@@ -273,7 +273,7 @@ def _reset_param_server_params():
 @click.option('--num-updates',
               default=32,
               help='Number of parameter updates to test normal path.')
-@click.option('--params-shape', nargs=2, type=int)
+@click.option('--params-shape', default=(1024, 1024), nargs=2, type=int)
 def test_param_server(num_updates, params_shape):
     """Test the parameter server's normal path.
 
