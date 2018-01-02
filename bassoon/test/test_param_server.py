@@ -67,8 +67,7 @@ def _reset_params(response_param_bytes, params):
     """Resets `params` with the value stored in `response_param_bytes`."""
     params.sem.release()
     returned_params = np.fromstring(response_param_bytes, dtype=np.float32)
-    params.val[:] = returned_params.reshape(
-        bassoon.parameter_server.PARAMS_SHAPE)
+    params.val[:] = returned_params.reshape(params.val.shape)
 
 
 def _handle_response_init_cb(response, params):
@@ -81,10 +80,7 @@ def _handle_response_init_cb(response, params):
 
     # NOTE(brendan): if the parameters have already been initialized, then the
     # server should return the initial parameters to update the client.
-    assert (response.length ==
-            4 *
-            bassoon.parameter_server.PARAMS_SHAPE[0] *
-            bassoon.parameter_server.PARAMS_SHAPE[1])
+    assert (response.length == 4*params.val.shape[0]*params.val.shape[1])
 
     deferred = twisted.web.client.readBody(response)
 
@@ -173,7 +169,7 @@ def _update_params(params,
                          num_updates)
 
 
-def _test_param_server_single_proc(num_updates):
+def _test_param_server_single_proc(num_updates, params_shape):
     """Makes `num_updates` sequential parameter updates to the server's
     parameters, which are initialized to zero.
 
@@ -191,15 +187,13 @@ def _test_param_server_single_proc(num_updates):
     update_counter = multiprocessing.Value(typecode_or_type='I')
     update_counter.value = 0
 
-    params = Params(
-        val=np.zeros(bassoon.parameter_server.PARAMS_SHAPE, dtype=np.float32),
-        sem=threading.Semaphore(value=1))
+    params = Params(val=np.zeros(params_shape, dtype=np.float32),
+                    sem=threading.Semaphore(value=1))
 
     params.sem.acquire()
     twisted.internet.reactor.callFromThread(_init_params, agent, params)
 
-    param_update = np.ones(bassoon.parameter_server.PARAMS_SHAPE,
-                           dtype=np.float32)
+    param_update = np.ones(params.val.shape, dtype=np.float32)
     for _ in range(num_updates):
         params.sem.acquire()
         twisted.internet.reactor.callFromThread(_update_params,
@@ -279,7 +273,8 @@ def _reset_param_server_params():
 @click.option('--num-updates',
               default=32,
               help='Number of parameter updates to test normal path.')
-def test_param_server(num_updates):
+@click.option('--params-shape', nargs=2, type=int)
+def test_param_server(num_updates, params_shape):
     """Test the parameter server's normal path.
 
     `nproc` processes are launched, all of which make `num_updates` updates to
@@ -298,7 +293,7 @@ def test_param_server(num_updates):
     processes = []
     for _ in range(multiprocessing.cpu_count()):
         p = multiprocessing.Process(target=_test_param_server_single_proc,
-                                    args=(num_updates,))
+                                    args=(num_updates, params_shape))
         p.start()
 
         processes.append(p)
@@ -311,7 +306,7 @@ def test_param_server(num_updates):
 
     agent = twisted.web.client.Agent(reactor=twisted.internet.reactor)
 
-    params = np.zeros(bassoon.parameter_server.PARAMS_SHAPE, dtype=np.float32)
+    params = np.zeros(params_shape, dtype=np.float32)
     twisted.internet.reactor.callFromThread(_check_test_results,
                                             agent,
                                             params,
