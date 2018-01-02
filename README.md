@@ -6,3 +6,8 @@ parameters.
 
 There are interfaces to initialize, reset, and update the shared parameters.
 See `parameter_server.py` for details.
+
+
+## Installation
+
+`pip3 install --editable . --user`

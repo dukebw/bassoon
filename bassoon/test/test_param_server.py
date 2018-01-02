@@ -1,8 +1,23 @@
-"""Tests the parameter server."""
+"""Tests the parameter server.
+
+The test currently is a unit test for the normal use case, when there is a
+single process running for each CPU core, all making updates to the parameter
+server at once.
+
+TODO(brendan): More black-box tests for the parameter server:
+
+    1. (Performance) test for <= 100ms RTT latency on 1MB transfers.
+
+    2. (Stress) Run 1024 processes all initializing and then iteratively
+       updating the parameters.
+
+    3. (Server killed) Test handling for server killed and restarting. How many
+       updates are lost? Clients alive or dead?
+"""
+import collections
 import io
 import multiprocessing
 import threading
-import time
 
 import click
 import numpy as np
@@ -15,44 +30,90 @@ import twisted.web.client
 import bassoon.parameter_server
 
 
-PARAMS_SHAPE = [1024, 1024]
+# NOTE(brendan): Params contains a value, and a semaphore to enforce sequential
+# sending of parameter updates (in order to simulate the normal use case).
+Params = collections.namedtuple(typename='Params', field_names='val, sem')
 
 
-def _reset_params(response_param_bytes, params):
-    """
-    """
-    params[:] = np.fromstring(response_param_bytes.decode('utf-8'),
-                              dtype=np.float32)
-
-
-def _handle_response_init(response, start_time, param_sem, params):
-    """
-    """
-    print('Elapsed time: {}'.format(time.time() - start_time))
-    param_sem.release()
-
-    if response.code != bassoon.parameter_server.HTTP_STATUS_ALREADY_INIT:
-        return
-
-    # NOTE(brendan): if the parameters have already been initialized, then the
-    # server should return the initial parameters to update the client.
-    assert response.length == 4*PARAMS_SHAPE[0]*PARAMS_SHAPE[1]
-
-    deferred = twisted.web.client.readBody(response)
-    deferred.addCallback(_reset_params, params)
+def _add_callback(deferred, callback, *args):
+    """Add callback to deferred, and set up logging for errors."""
+    deferred.addCallback(callback, *args)
+    deferred.addErrback(twisted.python.log.err, _why=repr(callback))
 
     return deferred
 
 
-def _handle_response_update(response,
-                            start_time,
-                            param_sem,
+def _post_body(agent, page, body):
+    """Posts `body` to /`page` on localhost port 8880."""
+    uri = 'http://localhost:8880/{}'.format(page)
+    return agent.request(method=b'POST',
+                         uri=uri.encode('utf-8'),
+                         headers=twisted.web.http_headers.Headers(
+                             {'User-Agent': ['Test parameter server']}),
+                         bodyProducer=body)
+
+
+def _post_params(agent, params_val, page):
+    """Make a POST request to localhost port 8880 with `params_val` as the request
+    body.
+    """
+    body = twisted.web.client.FileBodyProducer(
+        inputFile=io.BytesIO(params_val.tobytes()))
+
+    return _post_body(agent, page, body)
+
+
+def _reset_params(response_param_bytes, params):
+    """Resets `params` with the value stored in `response_param_bytes`."""
+    params.sem.release()
+    returned_params = np.fromstring(response_param_bytes, dtype=np.float32)
+    params.val[:] = returned_params.reshape(
+        bassoon.parameter_server.PARAMS_SHAPE)
+
+
+def _handle_response_init_cb(response, params):
+    """Reads `response` and initializes `params` with the server's returned
+    parameters iff the server has already been initialized.
+    """
+    if response.code != bassoon.parameter_server.HTTP_SUCCESS_ALREADY_INIT:
+        params.sem.release()
+        return
+
+    # NOTE(brendan): if the parameters have already been initialized, then the
+    # server should return the initial parameters to update the client.
+    assert (response.length ==
+            4 *
+            bassoon.parameter_server.PARAMS_SHAPE[0] *
+            bassoon.parameter_server.PARAMS_SHAPE[1])
+
+    deferred = twisted.web.client.readBody(response)
+
+    return _add_callback(deferred, _reset_params, params)
+
+
+def _init_params(agent, params):
+    """Initializes the server's parameters by making a POST to /init.
+
+    If the server's parameters are already initialized, the returned parameters
+    are filled into `params`.
+
+    Args:
+        agent: HTTP client.
+        params: Parameters to initialize the server with. `params` will be
+            overwritten with the return value from the server if the server's
+            parameters have already been initialized.
+    """
+    deferred = _post_params(agent, params.val, 'init')
+
+    return _add_callback(deferred, _handle_response_init_cb, params)
+
+
+def _reset_params_update_cb(response_param_bytes,
+                            params,
                             update_counter,
                             num_updates):
-    """
-    """
-    print('Elapsed time: {}'.format(time.time() - start_time))
-    param_sem.release()
+    """Reset `params`. See `_handle_response_update_cb` for arguments."""
+    _reset_params(response_param_bytes, params)
 
     with update_counter.get_lock():
         update_counter.value += 1
@@ -61,55 +122,66 @@ def _handle_response_update(response,
         twisted.internet.reactor.stop()
 
 
-def _post_params(agent, params, page):
-    """Make a POST request to localhost port 8880 with `params` as the request
-    body.
+def _handle_response_update_cb(response, params, update_counter, num_updates):
+    """Reads the response body of an /update POST, and fills `params` with the
+    resulting response.
+
+    Args:
+        response: Response returned from the /update POST.
+
+        For other arguments see `_update_params`.
+
+    Returns: A deferred that resets `params`.
     """
-    body = twisted.web.client.FileBodyProducer(
-        inputFile=io.BytesIO(params.tobytes()))
+    deferred = twisted.web.client.readBody(response)
 
-    uri = 'http://localhost:8880/{}'.format(page)
-    return agent.request(method=b'POST',
-                         uri=uri.encode('utf-8'),
-                         headers=twisted.web.http_headers.Headers(),
-                         bodyProducer=body)
-
-
-def _init_params(agent, param_sem, params):
-    """
-    """
-    start_time = time.time()
-
-    deferred = _post_params(agent, params, 'init')
-
-    deferred.addCallback(_handle_response_init, start_time, param_sem, params)
-
-    return deferred
-
-
-def _update_params(agent, param_sem, param_update, update_counter, num_updates):
-    """
-    """
-    start_time = time.time()
-
-    deferred = _post_params(agent, param_update, 'update')
-
-    deferred.addCallback(_handle_response_update,
-                         start_time,
-                         param_sem,
+    return _add_callback(deferred,
+                         _reset_params_update_cb,
+                         params,
                          update_counter,
                          num_updates)
 
-    return deferred
+
+def _update_params(params,
+                   agent,
+                   param_update,
+                   update_counter,
+                   num_updates):
+    """Updates the server's parameters via a POST to /update and a chain of
+    deferreds.
+
+    The server returns the updated parameters, which are stored in `params`. In
+    this way, parameters are synchronized between client and server.
+
+    Args:
+        params: Local worker copy of the parameters, to be filled in.
+        agent: HTTP client.
+        param_update: Update to make on the parameters.
+        update_counter: Counter for number of updates made, so that the reactor
+            can be stopped after `num_updates` updates.
+        num_updates: Total number of parameter updates to make.
+
+    Returns:
+        The deferred chain achieving the parameter update and synchronization.
+    """
+    deferred = _post_params(agent, param_update, 'update')
+
+    return _add_callback(deferred,
+                         _handle_response_update_cb,
+                         params,
+                         update_counter,
+                         num_updates)
 
 
 def _test_param_server_single_proc(num_updates):
-    """
+    """Makes `num_updates` sequential parameter updates to the server's
+    parameters, which are initialized to zero.
+
+    Args:
+        num_updates: Number of parameter updates this process should make.
     """
     t = threading.Thread(target=twisted.internet.reactor.run, args=(False,))
     t.start()
-
-    param_sem = threading.Semaphore(value=1)
 
     pool = twisted.web.client.HTTPConnectionPool(
         reactor=twisted.internet.reactor, persistent=True)
@@ -117,21 +189,88 @@ def _test_param_server_single_proc(num_updates):
                                      pool=pool)
 
     update_counter = multiprocessing.Value(typecode_or_type='I')
-    params = np.zeros(PARAMS_SHAPE, dtype=np.float32)
-    twisted.internet.reactor.callFromThread(_init_params,
-                                            agent,
-                                            param_sem,
-                                            params)
+    update_counter.value = 0
 
-    param_update = np.ones(PARAMS_SHAPE, dtype=np.float32)
+    params = Params(
+        val=np.zeros(bassoon.parameter_server.PARAMS_SHAPE, dtype=np.float32),
+        sem=threading.Semaphore(value=1))
+
+    params.sem.acquire()
+    twisted.internet.reactor.callFromThread(_init_params, agent, params)
+
+    param_update = np.ones(bassoon.parameter_server.PARAMS_SHAPE,
+                           dtype=np.float32)
     for _ in range(num_updates):
-        param_sem.acquire()
+        params.sem.acquire()
         twisted.internet.reactor.callFromThread(_update_params,
+                                                params,
                                                 agent,
-                                                param_sem,
                                                 param_update,
                                                 update_counter,
                                                 num_updates)
+
+    t.join()
+
+
+def _check_updates_applied_cb(response_bytes, num_updates):
+    """Checks that all updates were applied based on `response_bytes`, which
+    contains the parameters stored on the server, by checking that
+    nproc*num_updates is the value of each element of the parameters.
+
+    Args:
+        same as `_read_check_response_cb`.
+    """
+    twisted.internet.reactor.stop()
+
+    server_params = np.fromstring(response_bytes, dtype=np.float32)
+
+    num_proc = multiprocessing.cpu_count()
+    assert np.all(server_params == float(num_proc*num_updates))
+
+
+def _read_check_response_cb(response, num_updates):
+    """Reads a response body from a POST to /init, and checks that all updates
+    were applied.
+
+    Args:
+        response_bytes: Bytes of the response returned from the /init POST to
+            the server.
+        num_updates: Number of parameter updates to make.
+    """
+    deferred = twisted.web.client.readBody(response)
+    return _add_callback(deferred, _check_updates_applied_cb, num_updates)
+
+
+def _check_test_results(agent, params, num_updates):
+    """To get the current parameters stored on the server, a POST to /init
+    is made.
+
+    Args:
+        agent: HTTP client.
+        params: Dummy parameters to send to the parameter server, just to get
+            the already-initialized response.
+    """
+    deferred = _post_params(agent, params, 'init')
+    return _add_callback(deferred, _read_check_response_cb, num_updates)
+
+
+def _reset_param_server_cb(agent):
+    """Callback function to POST a to /reset, and stop the reactor
+    afterwards.
+    """
+    deferred = _post_body(agent, 'reset', None)
+
+    return _add_callback(deferred, lambda x: twisted.internet.reactor.stop())
+
+
+def _reset_param_server_params():
+    """Makes a call to reset the parameter server's parameters."""
+    t = threading.Thread(target=twisted.internet.reactor.run, args=(False,))
+    t.start()
+
+    agent = twisted.web.client.Agent(reactor=twisted.internet.reactor)
+
+    twisted.internet.reactor.callFromThread(_reset_param_server_cb, agent)
 
     t.join()
 
@@ -141,7 +280,21 @@ def _test_param_server_single_proc(num_updates):
               default=32,
               help='Number of parameter updates to test normal path.')
 def test_param_server(num_updates):
-    """Test the parameter server."""
+    """Test the parameter server's normal path.
+
+    `nproc` processes are launched, all of which make `num_updates` updates to
+    the parameter server. The parameters start at zero, and each update is an
+    array of all ones. So, the test can check that all updates went through by
+    checking that the final parameters contain nproc*num_updates in all
+    elements.
+    """
+    # NOTE(brendan): The server's parameters are reset from a separate process,
+    # in order to prevent any issues with `twisted.internet.reactor` already
+    # running when the `_test_param_server_single_proc` processes are forked.
+    p = multiprocessing.Process(target=_reset_param_server_params)
+    p.start()
+    p.join()
+
     processes = []
     for _ in range(multiprocessing.cpu_count()):
         p = multiprocessing.Process(target=_test_param_server_single_proc,
@@ -158,21 +311,12 @@ def test_param_server(num_updates):
 
     agent = twisted.web.client.Agent(reactor=twisted.internet.reactor)
 
-    params = np.zeros(PARAMS_SHAPE, dtype=np.float32)
-    # TODO(brendan): Clean this up and assert that the parameters have been
-    # updated correctly, according to the number of updates.
-    def _print_response(r):
-        deferred = twisted.web.client.readBody(r)
-        deferred.addCallback(lambda r_bytes: print(np.fromstring(r_bytes.decode('utf-8'), dtype=np.uint8).shape))
-
-        return deferred
-
-    def _print_params():
-        deferred = _post_params(agent, params, 'init')
-        deferred.addCallback(_print_response)
-
-        return deferred
-
-    twisted.internet.reactor.callFromThread(_print_params)
+    params = np.zeros(bassoon.parameter_server.PARAMS_SHAPE, dtype=np.float32)
+    twisted.internet.reactor.callFromThread(_check_test_results,
+                                            agent,
+                                            params,
+                                            num_updates)
 
     t.join()
+
+    print('Test passed!')
