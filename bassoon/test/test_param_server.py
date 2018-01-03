@@ -27,40 +27,13 @@ import twisted.internet.protocol
 import twisted.internet.reactor
 import twisted.web.client
 
+import bassoon.client
 import bassoon.parameter_server
 
 
 # NOTE(brendan): Params contains a value, and a semaphore to enforce sequential
 # sending of parameter updates (in order to simulate the normal use case).
 Params = collections.namedtuple(typename='Params', field_names='val, sem')
-
-
-def _add_callback(deferred, callback, *args):
-    """Add callback to deferred, and set up logging for errors."""
-    deferred.addCallback(callback, *args)
-    deferred.addErrback(twisted.python.log.err, _why=repr(callback))
-
-    return deferred
-
-
-def _post_body(agent, page, body):
-    """Posts `body` to /`page` on localhost port 8880."""
-    uri = 'http://localhost:8880/{}'.format(page)
-    return agent.request(method=b'POST',
-                         uri=uri.encode('utf-8'),
-                         headers=twisted.web.http_headers.Headers(
-                             {'User-Agent': ['Test parameter server']}),
-                         bodyProducer=body)
-
-
-def _post_params(agent, params_val, page):
-    """Make a POST request to localhost port 8880 with `params_val` as the request
-    body.
-    """
-    body = twisted.web.client.FileBodyProducer(
-        inputFile=io.BytesIO(params_val.tobytes()))
-
-    return _post_body(agent, page, body)
 
 
 def _reset_params(response_param_bytes, params):
@@ -80,11 +53,11 @@ def _handle_response_init_cb(response, params):
 
     # NOTE(brendan): if the parameters have already been initialized, then the
     # server should return the initial parameters to update the client.
-    assert (response.length == 4*params.val.shape[0]*params.val.shape[1])
+    assert response.length == 4*params.val.shape[0]*params.val.shape[1]
 
     deferred = twisted.web.client.readBody(response)
 
-    return _add_callback(deferred, _reset_params, params)
+    return bassoon.client.add_callback(deferred, _reset_params, params)
 
 
 def _init_params(agent, params):
@@ -99,9 +72,11 @@ def _init_params(agent, params):
             overwritten with the return value from the server if the server's
             parameters have already been initialized.
     """
-    deferred = _post_params(agent, params.val, 'init')
+    deferred = bassoon.client.post_params(agent, params.val, 'init')
 
-    return _add_callback(deferred, _handle_response_init_cb, params)
+    return bassoon.client.add_callback(deferred,
+                                       _handle_response_init_cb,
+                                       params)
 
 
 def _reset_params_update_cb(response_param_bytes,
@@ -131,11 +106,11 @@ def _handle_response_update_cb(response, params, update_counter, num_updates):
     """
     deferred = twisted.web.client.readBody(response)
 
-    return _add_callback(deferred,
-                         _reset_params_update_cb,
-                         params,
-                         update_counter,
-                         num_updates)
+    return bassoon.client.add_callback(deferred,
+                                       _reset_params_update_cb,
+                                       params,
+                                       update_counter,
+                                       num_updates)
 
 
 def _update_params(params,
@@ -160,13 +135,13 @@ def _update_params(params,
     Returns:
         The deferred chain achieving the parameter update and synchronization.
     """
-    deferred = _post_params(agent, param_update, 'update')
+    deferred = bassoon.client.post_params(agent, param_update, 'update')
 
-    return _add_callback(deferred,
-                         _handle_response_update_cb,
-                         params,
-                         update_counter,
-                         num_updates)
+    return bassoon.client.add_callback(deferred,
+                                       _handle_response_update_cb,
+                                       params,
+                                       update_counter,
+                                       num_updates)
 
 
 def _test_param_server_single_proc(num_updates, params_shape):
@@ -232,7 +207,9 @@ def _read_check_response_cb(response, num_updates):
         num_updates: Number of parameter updates to make.
     """
     deferred = twisted.web.client.readBody(response)
-    return _add_callback(deferred, _check_updates_applied_cb, num_updates)
+    return bassoon.client.add_callback(deferred,
+                                       _check_updates_applied_cb,
+                                       num_updates)
 
 
 def _check_test_results(agent, params, num_updates):
@@ -244,17 +221,20 @@ def _check_test_results(agent, params, num_updates):
         params: Dummy parameters to send to the parameter server, just to get
             the already-initialized response.
     """
-    deferred = _post_params(agent, params, 'init')
-    return _add_callback(deferred, _read_check_response_cb, num_updates)
+    deferred = bassoon.client.post_params(agent, params, 'init')
+    return bassoon.client.add_callback(deferred,
+                                       _read_check_response_cb,
+                                       num_updates)
 
 
 def _reset_param_server_cb(agent):
     """Callback function to POST a to /reset, and stop the reactor
     afterwards.
     """
-    deferred = _post_body(agent, 'reset', None)
+    deferred = bassoon.client.post_body(agent, 'reset', None)
 
-    return _add_callback(deferred, lambda x: twisted.internet.reactor.stop())
+    return bassoon.client.add_callback(
+        deferred, lambda x: twisted.internet.reactor.stop())
 
 
 def _reset_param_server_params():
