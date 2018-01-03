@@ -48,7 +48,7 @@ class Initialize(twisted.web.resource.Resource):
     def render_POST(self, request):
         if self.params.val is None:
             self.params.val = _decode_params(request)
-            return
+            return bytes()
 
         request.setResponseCode(HTTP_SUCCESS_ALREADY_INIT)
 
@@ -65,6 +65,8 @@ class Reset(twisted.web.resource.Resource):
     def render_POST(self, request):
         self.params.val = None
 
+        return bytes()
+
 
 class Update(twisted.web.resource.Resource):
     isLeaf = True
@@ -76,7 +78,7 @@ class Update(twisted.web.resource.Resource):
     def render_POST(self, request):
         if self.params.val is None:
             request.setResponseCode(HTTP_CLIENT_ERR_NOT_INIT)
-            return
+            return bytes()
 
         self.params.val += _decode_params(request)
 

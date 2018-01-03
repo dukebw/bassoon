@@ -15,7 +15,6 @@ TODO(brendan): More black-box tests for the parameter server:
        updates are lost? Clients alive or dead?
 """
 import collections
-import io
 import multiprocessing
 import threading
 
