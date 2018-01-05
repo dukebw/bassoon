@@ -35,6 +35,20 @@ import bassoon.parameter_server
 Params = collections.namedtuple(typename='Params', field_names='val, sem')
 
 
+def _post_params(agent, params_val, page):
+    """Convenience function for sending parameters to the parameter server as
+    bytes.
+
+    Args:
+        agent: HTTP client.
+        params_val: numpy array of parameter values of type `np.float32`.
+        page: Page of URI to POST to.
+
+    Returns the deferred corresponding to completion of the POST request.
+    """
+    return bassoon.client.post_data_bytes(agent, params_val.tobytes(), page)
+
+
 def _reset_params(response_param_bytes, params):
     """Resets `params` with the value stored in `response_param_bytes`."""
     params.sem.release()
@@ -71,7 +85,7 @@ def _init_params(agent, params):
             overwritten with the return value from the server if the server's
             parameters have already been initialized.
     """
-    deferred = bassoon.client.post_params(agent, params.val, 'init')
+    deferred = _post_params(agent, params.val, 'init/test')
 
     return bassoon.client.add_callback(deferred,
                                        _handle_response_init_cb,
@@ -134,7 +148,7 @@ def _update_params(params,
     Returns:
         The deferred chain achieving the parameter update and synchronization.
     """
-    deferred = bassoon.client.post_params(agent, param_update, 'update')
+    deferred = _post_params(agent, param_update, 'update/test')
 
     return bassoon.client.add_callback(deferred,
                                        _handle_response_update_cb,
@@ -220,7 +234,7 @@ def _check_test_results(agent, params, num_updates):
         params: Dummy parameters to send to the parameter server, just to get
             the already-initialized response.
     """
-    deferred = bassoon.client.post_params(agent, params, 'init')
+    deferred = _post_params(agent, params, 'init/test')
     return bassoon.client.add_callback(deferred,
                                        _read_check_response_cb,
                                        num_updates)
@@ -230,7 +244,7 @@ def _reset_param_server_cb(agent):
     """Callback function to POST a to /reset, and stop the reactor
     afterwards.
     """
-    deferred = bassoon.client.post_body(agent, 'reset', None)
+    deferred = bassoon.client.post_body(agent, 'reset/test', None)
 
     return bassoon.client.add_callback(
         deferred, lambda x: twisted.internet.reactor.stop())

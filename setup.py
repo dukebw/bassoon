@@ -1,4 +1,9 @@
-"""Installs the Bassoon parameter server."""
+"""Installs the Bassoon parameter server.
+
+Note that PyTorch is a dependency, and is not listed as a dependency in the
+setup script, in order to prevent automatic installation of PyTorch. Therefore
+users have to install PyTorch manually.
+"""
 from setuptools import setup
 
 
