@@ -49,7 +49,8 @@ def wire_to_optim_state(optim, wire_data, get_state_fn):
 
             len_state = len(state.data.view(-1))
             end = start + len_state
-            state.data[:] = torch.FloatTensor(wire_data[start:end])
+            wire_state = torch.FloatTensor(wire_data[start:end])
+            state.data[:] = wire_state.view(state.data.size())
 
             start += len_state
 
