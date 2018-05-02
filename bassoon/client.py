@@ -1,5 +1,6 @@
 """Client library code for bassoon."""
 import io
+import threading
 
 import torch
 import twisted
@@ -81,3 +82,21 @@ def post_data_bytes(agent, data_bytes, page):
         inputFile=io.BytesIO(data_bytes))
 
     return post_body(agent, page, body)
+
+
+def start_reactor():
+    """Starts a daemon running twisted.internet.reactor.
+
+    Returns: (agent, semaphore) tuple, where agent is a web client for the
+    reactor, and semaphore is a zero valued semaphore.
+    """
+    t = threading.Thread(target=twisted.internet.reactor.run, args=(False,))
+    t.daemon = True
+    t.start()
+
+    pool = twisted.web.client.HTTPConnectionPool(
+        reactor=twisted.internet.reactor, persistent=True)
+    agent = twisted.web.client.Agent(reactor=twisted.internet.reactor,
+                                     pool=pool)
+
+    return agent, threading.Semaphore(0)
