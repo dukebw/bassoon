@@ -138,6 +138,46 @@ class Update(twisted.web.resource.Resource):
         return params.tostring()
 
 
+class FusionDriverSharedTrain(twisted.web.resource.Resource):
+    """Returns an epoch of architectures on POST."""
+    isLeaf = True
+
+    def __init__(self):
+        twisted.web.resource.Resource.__init__(self)
+
+    def render_POST(self, request):
+        request_content = request.content.read()
+        request_content = np.frombuffer(request_content, dtype=np.int32)
+
+        minibatches_per_epoch = request_content[0]
+        num_nodes = request_content[1]
+        rank = request_content[2]
+
+        epoch_archs = []
+        for _ in range(minibatches_per_epoch):
+            binary_ops = np.random.binomial(n=1, p=0.5, size=num_nodes)
+
+            act_fns = np.random.multinomial(n=1, pvals=4*[0.25], size=2*num_nodes)
+            # NOTE(brendan): Converts from one-hot vector to index.
+            act_fns = np.argmax(act_fns, axis=1)
+
+            in_nodes = [np.random.multinomial(n=1, pvals=i*[1/i], size=2)
+                        for i in range(rank, rank + num_nodes)]
+            in_nodes = [np.argmax(n, axis=1) for n in in_nodes]
+            in_nodes = np.concatenate(in_nodes)
+
+            # NOTE(brendan): wire_arch is of length
+            # num_nodes + 2*num_nodes + 2*num_nodes
+            wire_arch = np.concatenate([binary_ops, act_fns, in_nodes])
+            wire_arch = wire_arch.astype(np.uint8)
+
+            epoch_archs.append(wire_arch)
+
+        epoch_archs = np.concatenate(epoch_archs).tobytes()
+
+        return epoch_archs
+
+
 def _decode_params(request):
     """Converts parameters serialized as bytes in `request` to a numpy array.
     """
@@ -210,6 +250,9 @@ def parameter_server():
     init.putChild(path=b'test', child=InitializeTest(params))
     reset.putChild(path=b'test', child=ResetTest(params))
     update.putChild(path=b'test', child=UpdateTest(params))
+
+    fusion_driver_shared_train = FusionDriverSharedTrain()
+    root.putChild(path=b'fusion', child=fusion_driver_shared_train)
 
     site = twisted.web.server.Site(resource=root)
 
