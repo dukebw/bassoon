@@ -2,6 +2,7 @@
 import io
 import threading
 
+import numpy as np
 import torch
 import twisted
 
@@ -84,11 +85,42 @@ def post_data_bytes(agent, data_bytes, page):
     return post_body(agent, page, body)
 
 
+def _set_buffer(response_bytes, out_buf, sem):
+    """Copy the response into out_buf."""
+    out_buf[:] = np.frombuffer(response_bytes, dtype=np.uint8)
+
+    sem.release()
+
+
+def _handle_response_recv_buf_cb(response, out_buf, sem):
+    """Read the POST response."""
+    deferred = twisted.web.client.readBody(response)
+
+    return add_callback(deferred, _set_buffer, out_buf, sem)
+
+
+def receive_buffer(out_buf, agent, request_content, uri, sem):
+    """POSTS to uri and receives a uint8 buffer response.
+
+    Args:
+        out_buf: Output buffer.
+        agent: Web client.
+        request_content: Content to POST to uri.
+        uri: uri to POST to and receive buffer from.
+        sem: Semaphore to release upon receiving buffer.
+
+    Returns: a callback that fills out_buf with the POST response body.
+    """
+    deferred = post_data_bytes(agent, request_content.tobytes(), uri)
+
+    return add_callback(deferred, _handle_response_recv_buf_cb, out_buf, sem)
+
+
 def start_reactor():
     """Starts a daemon running twisted.internet.reactor.
 
     Returns: (agent, semaphore) tuple, where agent is a web client for the
-    reactor, and semaphore is a zero valued semaphore.
+        reactor, and semaphore is a zero valued semaphore.
     """
     t = threading.Thread(target=twisted.internet.reactor.run, args=(False,))
     t.daemon = True
