@@ -97,7 +97,7 @@ class Reset(twisted.web.resource.Resource):
         twisted.web.resource.Resource.__init__(self)
         self.optim = optim
 
-    def render_POST(self, request):  # pylint: disable=unused-argument
+    def render_POST(self, request):  # pylint:disable=unused-argument
         """A POST to /reset returns the server to the uninitialized state."""
         self.optim.val = None
 
@@ -138,6 +138,28 @@ class Update(twisted.web.resource.Resource):
         return params.tostring()
 
 
+def _gen_random_arch(num_nodes, rank):
+    """Generates one uniformly random architecture with num_nodes nodes."""
+    binary_ops = np.random.binomial(n=1, p=0.5, size=num_nodes)
+
+    act_fns = np.random.multinomial(n=1,
+                                    pvals=4*[0.25],
+                                    size=2*num_nodes)
+    # NOTE(brendan): Converts from one-hot vector to index.
+    act_fns = np.argmax(act_fns, axis=1)
+
+    in_nodes = [np.random.multinomial(n=1, pvals=i*[1/i], size=2)
+                for i in range(rank, rank + num_nodes)]
+    in_nodes = [np.argmax(n, axis=1) for n in in_nodes]
+    in_nodes = np.concatenate(in_nodes)
+
+    # NOTE(brendan): wire_arch is of length
+    # num_nodes + 2*num_nodes + 2*num_nodes
+    wire_arch = np.concatenate([binary_ops, act_fns, in_nodes])
+
+    return wire_arch.astype(np.uint8)
+
+
 class FusionSharedTrainDriver(twisted.web.resource.Resource):
     """Returns an epoch of architectures on POST."""
     isLeaf = True
@@ -146,6 +168,9 @@ class FusionSharedTrainDriver(twisted.web.resource.Resource):
         twisted.web.resource.Resource.__init__(self)
 
     def render_POST(self, request):
+        """Generates a uniformly random epoch of architectures with num_nodes
+        nodes.
+        """
         request_content = request.content.read()
         request_content = np.frombuffer(request_content, dtype=np.int32)
 
@@ -155,21 +180,7 @@ class FusionSharedTrainDriver(twisted.web.resource.Resource):
 
         epoch_archs = []
         for _ in range(minibatches_per_epoch):
-            binary_ops = np.random.binomial(n=1, p=0.5, size=num_nodes)
-
-            act_fns = np.random.multinomial(n=1, pvals=4*[0.25], size=2*num_nodes)
-            # NOTE(brendan): Converts from one-hot vector to index.
-            act_fns = np.argmax(act_fns, axis=1)
-
-            in_nodes = [np.random.multinomial(n=1, pvals=i*[1/i], size=2)
-                        for i in range(rank, rank + num_nodes)]
-            in_nodes = [np.argmax(n, axis=1) for n in in_nodes]
-            in_nodes = np.concatenate(in_nodes)
-
-            # NOTE(brendan): wire_arch is of length
-            # num_nodes + 2*num_nodes + 2*num_nodes
-            wire_arch = np.concatenate([binary_ops, act_fns, in_nodes])
-            wire_arch = wire_arch.astype(np.uint8)
+            wire_arch = _gen_random_arch(num_nodes, rank)
 
             epoch_archs.append(wire_arch)
 
@@ -178,8 +189,33 @@ class FusionSharedTrainDriver(twisted.web.resource.Resource):
         return epoch_archs
 
 
-class FusionSharedValDriver(twisted.web.resource.Resource):
-    pass
+class FusionSharedValDriverArch(twisted.web.resource.Resource):
+    isLeaf = True
+
+    def __init__(self):
+        twisted.web.resource.Resource.__init__(self)
+
+    def render_POST(self, request):
+        """Returns one uniformly random architecture."""
+        request_content = request.content.read()
+        request_content = np.frombuffer(request_content, dtype=np.int32)
+
+        num_nodes = request_content[0]
+        rank = request_content[1]
+        arch = _gen_random_arch(num_nodes, rank)
+
+        return arch.tobytes()
+
+
+class FusionSharedValDriverReward(twisted.web.resource.Resource):
+    isLeaf = True
+
+    def __init__(self):
+        twisted.web.resource.Resource.__init__(self)
+
+    def render_POST(self, request):  # pylint:disable=unused-argument
+        """ACKs."""
+        return bytes()
 
 
 def _decode_params(request):
@@ -215,7 +251,7 @@ class ResetTest(twisted.web.resource.Resource):
         twisted.web.resource.Resource.__init__(self)
         self.params = params
 
-    def render_POST(self, request):  # pylint: disable=unused-argument
+    def render_POST(self, request):  # pylint:disable=unused-argument
         self.params.val = None
 
         return bytes()
@@ -262,9 +298,17 @@ def parameter_server():
     fusion.putChild(path=b'shared-train-driver',
                     child=fusion_shared_train_driver)
 
-    fusion_shared_val_driver = FusionSharedValDriver()
+    fusion_shared_val_driver = twisted.web.resource.Resource()
     fusion.putChild(path=b'shared-val-driver',
                     child=fusion_shared_val_driver)
+
+    fusion_shared_val_arch = FusionSharedValDriverArch()
+    fusion_shared_val_driver.putChild(path=b'shared-val-driver/arch',
+                                      child=fusion_shared_val_arch)
+
+    fusion_shared_val_reward = FusionSharedValDriverReward()
+    fusion_shared_val_driver.putChild(path=b'shared-val-driver/reward',
+                                      child=fusion_shared_val_reward)
 
     site = twisted.web.server.Site(resource=root)
 
