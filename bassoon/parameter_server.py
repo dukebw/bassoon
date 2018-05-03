@@ -138,7 +138,7 @@ class Update(twisted.web.resource.Resource):
         return params.tostring()
 
 
-class FusionDriverSharedTrain(twisted.web.resource.Resource):
+class FusionSharedTrainDriver(twisted.web.resource.Resource):
     """Returns an epoch of architectures on POST."""
     isLeaf = True
 
@@ -176,6 +176,10 @@ class FusionDriverSharedTrain(twisted.web.resource.Resource):
         epoch_archs = np.concatenate(epoch_archs).tobytes()
 
         return epoch_archs
+
+
+class FusionSharedValDriver(twisted.web.resource.Resource):
+    pass
 
 
 def _decode_params(request):
@@ -251,8 +255,16 @@ def parameter_server():
     reset.putChild(path=b'test', child=ResetTest(params))
     update.putChild(path=b'test', child=UpdateTest(params))
 
-    fusion_driver_shared_train = FusionDriverSharedTrain()
-    root.putChild(path=b'fusion', child=fusion_driver_shared_train)
+    fusion = twisted.web.resource.Resource()
+    root.putChild(path=b'fusion', child=fusion)
+
+    fusion_shared_train_driver = FusionSharedTrainDriver()
+    fusion.putChild(path=b'shared-train-driver',
+                    child=fusion_shared_train_driver)
+
+    fusion_shared_val_driver = FusionSharedValDriver()
+    fusion.putChild(path=b'shared-val-driver',
+                    child=fusion_shared_val_driver)
 
     site = twisted.web.server.Site(resource=root)
 
