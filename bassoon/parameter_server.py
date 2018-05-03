@@ -303,11 +303,11 @@ def parameter_server():
                     child=fusion_shared_val_driver)
 
     fusion_shared_val_arch = FusionSharedValDriverArch()
-    fusion_shared_val_driver.putChild(path=b'shared-val-driver/arch',
+    fusion_shared_val_driver.putChild(path=b'arch',
                                       child=fusion_shared_val_arch)
 
     fusion_shared_val_reward = FusionSharedValDriverReward()
-    fusion_shared_val_driver.putChild(path=b'shared-val-driver/reward',
+    fusion_shared_val_driver.putChild(path=b'reward',
                                       child=fusion_shared_val_reward)
 
     site = twisted.web.server.Site(resource=root)
