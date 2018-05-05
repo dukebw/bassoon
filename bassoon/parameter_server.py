@@ -218,6 +218,18 @@ class FusionSharedValDriverReward(twisted.web.resource.Resource):
         return bytes()
 
 
+class FusionControllerTrainStub(twisted.web.resource.Resource):
+    isLeaf = True
+
+    def __init__(self):
+        twisted.web.resource.Resource.__init__(self)
+
+    def render_POST(self, request):  # pylint:disable=unused-argument
+        """Return random reward."""
+        reward = np.random.uniform(low=0.0, high=1.0)
+        return np.float32(reward).tobytes()
+
+
 def _decode_params(request):
     """Converts parameters serialized as bytes in `request` to a numpy array.
     """
@@ -309,6 +321,10 @@ def parameter_server():
     fusion_shared_val_reward = FusionSharedValDriverReward()
     fusion_shared_val_driver.putChild(path=b'reward',
                                       child=fusion_shared_val_reward)
+
+    fusion_controller_train_stub = FusionControllerTrainStub()
+    fusion.putChild(path=b'controller-train-stub',
+                    child=fusion_controller_train_stub)
 
     site = twisted.web.server.Site(resource=root)
 
