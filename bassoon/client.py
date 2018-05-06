@@ -87,7 +87,7 @@ def post_data_bytes(agent, data_bytes, page):
 
 def _set_buffer(response_bytes, out_buf, sem):
     """Copy the response into out_buf."""
-    out_buf[:] = np.frombuffer(response_bytes, dtype=np.uint8)
+    out_buf[:] = np.frombuffer(response_bytes, dtype=out_buf.dtype)
 
     sem.release()
 
@@ -105,7 +105,7 @@ def receive_buffer(out_buf, agent, request_content, uri, sem):
     Args:
         out_buf: Output buffer.
         agent: Web client.
-        request_content: Content to POST to uri.
+        request_content: Numpy array containing content to POST to uri.
         uri: uri to POST to and receive buffer from.
         sem: Semaphore to release upon receiving buffer.
 
