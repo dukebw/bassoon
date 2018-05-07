@@ -110,6 +110,9 @@ def receive_buffer(out_buf, agent, request_content, uri, sem):
         sem: Semaphore to release upon receiving buffer.
 
     Returns: a callback that fills out_buf with the POST response body.
+
+    IMPORTANT(brendan): sem will be incremented upon completion, and should be
+    acquired _before_ calling receive_buffer.
     """
     deferred = post_data_bytes(agent, request_content.tobytes(), uri)
 
@@ -120,7 +123,7 @@ def start_reactor():
     """Starts a daemon running twisted.internet.reactor.
 
     Returns: (agent, semaphore) tuple, where agent is a web client for the
-        reactor, and semaphore is a zero valued semaphore.
+        reactor, and semaphore is a one-valued semaphore.
     """
     t = threading.Thread(target=twisted.internet.reactor.run, args=(False,))
     t.daemon = True
@@ -131,4 +134,4 @@ def start_reactor():
     agent = twisted.web.client.Agent(reactor=twisted.internet.reactor,
                                      pool=pool)
 
-    return agent, threading.Semaphore(0)
+    return agent, threading.Semaphore(1)

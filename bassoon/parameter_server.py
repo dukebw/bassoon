@@ -226,7 +226,8 @@ class FusionControllerTrainStub(twisted.web.resource.Resource):
 
     def render_POST(self, request):  # pylint:disable=unused-argument
         """Return random reward."""
-        reward = np.random.uniform(low=0.0, high=1.0)
+        reward = np.clip(
+            np.random.normal(loc=0.5, scale=0.1), a_min=0.0, a_max=1.0)
         return np.float32(reward).tobytes()
 
 
