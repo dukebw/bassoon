@@ -207,7 +207,9 @@ class FusionSharedValDriverArch(twisted.web.resource.Resource):
         return arch.tobytes()
 
 
-class FusionSharedValDriverReward(twisted.web.resource.Resource):
+class AckStub(twisted.web.resource.Resource):
+    """Stub that always acks."""
+
     isLeaf = True
 
     def __init__(self):
@@ -218,7 +220,7 @@ class FusionSharedValDriverReward(twisted.web.resource.Resource):
         return bytes()
 
 
-class FusionControllerTrainStub(twisted.web.resource.Resource):
+class FusionControllerStepStub(twisted.web.resource.Resource):
     isLeaf = True
 
     def __init__(self):
@@ -229,6 +231,19 @@ class FusionControllerTrainStub(twisted.web.resource.Resource):
         reward = np.clip(
             np.random.normal(loc=0.5, scale=0.1), a_min=0.0, a_max=1.0)
         return np.float32(reward).tobytes()
+
+
+class FusionControllerMinibatchesStub(twisted.web.resource.Resource):
+    """Stub to return minibatches per epoch."""
+
+    isLeaf = True
+
+    def __init__(self):
+        twisted.web.resource.Resource.__init__(self)
+
+    def render_POST(self, request):  # pylint:disable=unused-argument
+        """Return number of minibatches per epoch."""
+        return np.int32(1500).tobytes()
 
 
 def _decode_params(request):
@@ -319,13 +334,25 @@ def parameter_server():
     fusion_shared_val_driver.putChild(path=b'arch',
                                       child=fusion_shared_val_arch)
 
-    fusion_shared_val_reward = FusionSharedValDriverReward()
+    fusion_shared_val_reward = AckStub()
     fusion_shared_val_driver.putChild(path=b'reward',
                                       child=fusion_shared_val_reward)
 
-    fusion_controller_train_stub = FusionControllerTrainStub()
+    fusion_controller_train_stub = twisted.web.resource.Resource()
     fusion.putChild(path=b'controller-train-stub',
                     child=fusion_controller_train_stub)
+
+    fusion_controller_step = FusionControllerStepStub()
+    fusion_controller_train_stub.putChild(path=b'step',
+                                          child=fusion_controller_step)
+
+    fusion_controller_minibatches = FusionControllerMinibatchesStub()
+    fusion_controller_train_stub.putChild(path=b'minibatches_per_epoch',
+                                          child=fusion_controller_minibatches)
+
+    fusion_controller_epoch_arch = AckStub()
+    fusion_controller_train_stub.putChild(path=b'epoch_arch',
+                                          child=fusion_controller_epoch_arch)
 
     site = twisted.web.server.Site(resource=root)
 
