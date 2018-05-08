@@ -31,6 +31,7 @@ See the `render_POST` method docstrings for the `twisted.web.resource.Resource`
 subclasses in this module for detailed descriptions.
 """
 import pickle
+import threading
 
 import numpy as np
 import twisted.web.resource
@@ -44,22 +45,27 @@ from . import client
 
 HTTP_SUCCESS_ALREADY_INIT = 299
 HTTP_CLIENT_ERR_NOT_INIT = 499
+HTTP_CLIENT_ERR_INVALID_PARAMS = 498
+
+NODE_SIZE = 5
 
 
-class Params(types.Struct):
-    """Wrapper to dependency-inject parameters into the different
+class Injection(types.Struct):
+    """Wrapper to dependency-inject stuff into the different
     `twisted.web.resource.Resource` implementations.
     """
     _fields = ['val']
 
 
-class Optim(types.Struct):
-    """Wrapper to dependency-inject a PyTorch optimizer."""
-    _fields = ['val']
+class SemaphoreInjection(types.Struct):
+    """Dependency injection of a resource that requires a semaphore."""
+    _fields = ['val', 'sem']
+
 
 
 class Initialize(twisted.web.resource.Resource):
     """A class handling POST requests to /init."""
+
     def __init__(self, optim):
         twisted.web.resource.Resource.__init__(self)
         self.optim = optim
@@ -93,6 +99,7 @@ class Initialize(twisted.web.resource.Resource):
 
 class Reset(twisted.web.resource.Resource):
     """A class handling POST requests to /reset."""
+
     def __init__(self, optim):
         twisted.web.resource.Resource.__init__(self)
         self.optim = optim
@@ -106,6 +113,7 @@ class Reset(twisted.web.resource.Resource):
 
 class Update(twisted.web.resource.Resource):
     """A class handling POST requests to /update."""
+
     def __init__(self, optim):
         twisted.web.resource.Resource.__init__(self)
         self.optim = optim
@@ -160,8 +168,166 @@ def _gen_random_arch(num_nodes, rank):
     return wire_arch.astype(np.uint8)
 
 
+def _read_shared_train(request):
+    """Read and return request content from shared model trainer."""
+    request_content = request.content.read()
+    request_content = np.frombuffer(request_content, dtype=np.int32)
+
+    minibatches_per_epoch = request_content[0]
+    num_nodes = request_content[1]
+    rank = request_content[2]
+
+    return minibatches_per_epoch, num_nodes, rank
+
+
+class FusionSharedTrain(twisted.web.resource.Resource):
+    """Respond to request for an epoch of architectures."""
+
+    isLeaf = True
+
+    def __init__(self, epoch_archs, minibatches_per_epoch):
+        twisted.web.resource.Resource.__init__(self)
+        self.epoch_archs = epoch_archs
+        self.minibatches_per_epoch = minibatches_per_epoch
+
+    def render_POST(self, request):
+        """Return an epoch of architectures once available."""
+        self.epoch_archs.sem.acquire()
+
+        minibatches_per_epoch, num_nodes, rank = _read_shared_train(request)
+
+        epoch_archs = self.epoch_archs.val
+        if minibatches_per_epoch*num_nodes*rank != len(epoch_archs):
+            request.setResponseCode(HTTP_CLIENT_ERR_INVALID_PARAMS)
+
+            return bytes()
+
+        if self.minibatches_per_epoch.val is None:
+            self.minibatches_per_epoch.val = minibatches_per_epoch
+            self.minibatches_per_epoch.sem.release()
+
+        return epoch_archs.tobytes()
+
+
+def _read_shared_val_arch(request):
+    """Read arch request content from validate_rl script."""
+    request_content = request.content.read()
+    request_content = np.frombuffer(request_content, dtype=np.int32)
+
+    num_nodes = request_content[0]
+    rank = request_content[1]
+
+    return num_nodes, rank
+
+
+class FusionSharedValArch(twisted.web.resource.Resource):
+    """Send an available architecture to validate_rl script."""
+
+    isLeaf = True
+
+    def __init__(self, val_arch):
+        twisted.web.resource.Resource.__init__(self)
+        self.val_arch = val_arch
+
+    def render_POST(self, request):
+        """Wait on validation architecture then send it."""
+        self.val_arch.sem.acquire()
+
+        num_nodes, _ = _read_shared_val_arch(request)
+
+        val_arch = self.val_arch.val
+        if NODE_SIZE*num_nodes != len(val_arch):
+            request.setResponseCode(HTTP_CLIENT_ERR_INVALID_PARAMS)
+
+            return bytes()
+
+        return val_arch.tobytes()
+
+
+class FusionSharedValReward(twisted.web.resource.Resource):
+    """Receive a reward."""
+
+    isLeaf = True
+
+    def __init__(self, val_reward):
+        twisted.web.resource.Resource.__init__(self)
+        self.val_reward = val_reward
+
+    def render_POST(self, request):
+        """Receive a validation minibatch's reward and increment semaphore."""
+        request_content = request.content.read()
+        reward = np.frombuffer(request_content, dtype=np.float32)
+
+        self.val_reward.val = np.frombuffer(reward, dtype=np.float32)
+        self.val_reward.sem.release()
+
+        return bytes()
+
+
+class FusionControllerStep(twisted.web.resource.Resource):
+    """Handle fusion controller step."""
+
+    isLeaf = True
+
+    def __init__(self, val_arch, val_reward):
+        twisted.web.resource.Resource.__init__(self)
+        self.val_arch = val_arch
+        self.val_reward = val_reward
+
+    def render_POST(self, request):
+        """Read a validation architecture, signal its semaphore, then wait for
+        the reward.
+        """
+        request_content = request.content.read()
+        arch = np.frombuffer(request_content, dtype=np.uint8)
+
+        self.val_arch.val = arch
+        self.val_arch.sem.release()
+
+        self.val_reward.acquire()
+        return self.val_reward.val.tobytes()
+
+
+class FusionControllerEpochArch(twisted.web.resource.Resource):
+    """Epoch architecture receiver."""
+
+    isLeaf = True
+
+    def __init__(self, epoch_archs):
+        twisted.web.resource.Resource.__init__(self)
+        self.epoch_archs = epoch_archs
+
+    def render_POST(self, request):
+        """Receive an epoch of architectures and signal."""
+        request_content = request.content.read()
+        epoch_archs = np.frombuffer(request_content, dtype=np.uint8)
+
+        self.epoch_archs.val = epoch_archs
+        self.epoch_archs.sem.release()
+
+        return bytes()
+
+
+class FusionControllerMinibatches(twisted.web.resource.Resource):
+    """Transfer minibatches per epoch information."""
+
+    isLeaf = True
+
+    def __init__(self, minibatches_per_epoch):
+        twisted.web.resource.Resource.__init__(self)
+        self.minibatches_per_epoch = minibatches_per_epoch
+
+    def render_POST(self, request):  # pylint:disable=unused-argument
+        """Send minibatches per epoch once available."""
+        with self.minibatches_per_epoch.sem:
+            pass
+
+        return self.minibatches_per_epoch.val.tobytes()
+
+
 class FusionSharedTrainDriver(twisted.web.resource.Resource):
-    """Returns an epoch of architectures on POST."""
+    """Return an epoch of architectures on POST."""
+
     isLeaf = True
 
     def __init__(self):
@@ -171,12 +337,7 @@ class FusionSharedTrainDriver(twisted.web.resource.Resource):
         """Generates a uniformly random epoch of architectures with num_nodes
         nodes.
         """
-        request_content = request.content.read()
-        request_content = np.frombuffer(request_content, dtype=np.int32)
-
-        minibatches_per_epoch = request_content[0]
-        num_nodes = request_content[1]
-        rank = request_content[2]
+        minibatches_per_epoch, num_nodes, rank = _read_shared_train(request)
 
         epoch_archs = []
         for _ in range(minibatches_per_epoch):
@@ -197,11 +358,7 @@ class FusionSharedValDriverArch(twisted.web.resource.Resource):
 
     def render_POST(self, request):
         """Returns one uniformly random architecture."""
-        request_content = request.content.read()
-        request_content = np.frombuffer(request_content, dtype=np.int32)
-
-        num_nodes = request_content[0]
-        rank = request_content[1]
+        num_nodes, rank = _read_shared_val_arch(request)
         arch = _gen_random_arch(num_nodes, rank)
 
         return arch.tobytes()
@@ -304,8 +461,8 @@ class UpdateTest(twisted.web.resource.Resource):
 
 def parameter_server():
     """Runs a parameter server that stores and updates a set of parameters."""
-    params = Params(val=None)
-    optim = Optim(val=None)
+    params = Injection(val=None)
+    optim = Injection(val=None)
 
     root = twisted.web.resource.Resource()
     init = Initialize(optim)
@@ -322,6 +479,39 @@ def parameter_server():
     fusion = twisted.web.resource.Resource()
     root.putChild(path=b'fusion', child=fusion)
 
+    epoch_archs = SemaphoreInjection(val=None, sem=threading.Semaphore(0))
+    minibatches_per_epoch = SemaphoreInjection(val=None,
+                                               sem=threading.Semaphore(0))
+    fusion_shared_train = FusionSharedTrain(epoch_archs, minibatches_per_epoch)
+    fusion.putChild(path=b'shared-train', child=fusion_shared_train)
+
+    fusion_shared_val = twisted.web.resource.Resource()
+    fusion.putChild(path=b'shared-val', child=fusion_shared_val)
+
+    val_arch = SemaphoreInjection(val=None, sem=threading.Semaphore(0))
+    fusion_shared_val_arch = FusionSharedValArch(val_arch)
+    fusion_shared_val.putChild(path=b'arch', child=fusion_shared_val_arch)
+
+    val_reward = SemaphoreInjection(val=None, sem=threading.Semaphore(0))
+    fusion_shared_val_reward = FusionSharedValReward(val_reward)
+    fusion_shared_val.putChild(path=b'arch', child=fusion_shared_val_reward)
+
+    controller_train = twisted.web.resource.Resource()
+    fusion.putChild(path=b'controller-train', child=controller_train)
+
+    fusion_controller_step = FusionControllerStep(val_arch, val_reward)
+    controller_train.putChild(path=b'step', child=fusion_controller_step)
+
+    fusion_controller_epoch_arch = FusionControllerEpochArch(epoch_archs)
+    controller_train.putChild(path=b'epoch_arch',
+                              child=fusion_controller_epoch_arch)
+
+    fusion_controller_minibatches = FusionControllerMinibatches(
+        minibatches_per_epoch)
+    controller_train.putChild(path=b'minibatches_per_epoch',
+                              child=fusion_controller_minibatches)
+
+    # NOTE(brendan): Drivers and stubs for development
     fusion_shared_train_driver = FusionSharedTrainDriver()
     fusion.putChild(path=b'shared-train-driver',
                     child=fusion_shared_train_driver)
@@ -330,21 +520,21 @@ def parameter_server():
     fusion.putChild(path=b'shared-val-driver',
                     child=fusion_shared_val_driver)
 
-    fusion_shared_val_arch = FusionSharedValDriverArch()
+    fusion_shared_val_driver_arch = FusionSharedValDriverArch()
     fusion_shared_val_driver.putChild(path=b'arch',
-                                      child=fusion_shared_val_arch)
+                                      child=fusion_shared_val_driver_arch)
 
-    fusion_shared_val_reward = AckStub()
+    fusion_shared_val_driver_reward = AckStub()
     fusion_shared_val_driver.putChild(path=b'reward',
-                                      child=fusion_shared_val_reward)
+                                      child=fusion_shared_val_driver_reward)
 
     fusion_controller_train_stub = twisted.web.resource.Resource()
     fusion.putChild(path=b'controller-train-stub',
                     child=fusion_controller_train_stub)
 
-    fusion_controller_step = FusionControllerStepStub()
+    fusion_controller_step_stub = FusionControllerStepStub()
     fusion_controller_train_stub.putChild(path=b'step',
-                                          child=fusion_controller_step)
+                                          child=fusion_controller_step_stub)
 
     fusion_controller_minibatches = FusionControllerMinibatchesStub()
     fusion_controller_train_stub.putChild(path=b'minibatches_per_epoch',
