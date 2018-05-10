@@ -4,7 +4,10 @@ import threading
 
 import numpy as np
 import torch
-import twisted
+import twisted.python.log
+import twisted.internet.reactor
+import twisted.web.client
+import twisted.web.http_headers
 
 
 def optim_state_to_wire(optim, get_state_fn):
@@ -87,7 +90,11 @@ def post_data_bytes(agent, data_bytes, page):
 
 def _set_buffer(response_bytes, out_buf, sem):
     """Copy the response into out_buf."""
-    out_buf[:] = np.frombuffer(response_bytes, dtype=out_buf.dtype)
+    try:
+        out_buf[:] = np.frombuffer(response_bytes, dtype=out_buf.dtype)
+    except ValueError:
+        print(f'length or value error: {response_bytes}')
+        raise
 
     sem.release()
 
