@@ -1,8 +1,13 @@
 """Client library code for bassoon."""
 import io
+import threading
 
+import numpy as np
 import torch
-import twisted
+import twisted.python.log
+import twisted.internet.reactor
+import twisted.web.client
+import twisted.web.http_headers
 
 
 def optim_state_to_wire(optim, get_state_fn):
@@ -81,3 +86,59 @@ def post_data_bytes(agent, data_bytes, page):
         inputFile=io.BytesIO(data_bytes))
 
     return post_body(agent, page, body)
+
+
+def _set_buffer(response_bytes, out_buf, sem):
+    """Copy the response into out_buf."""
+    try:
+        out_buf[:] = np.frombuffer(response_bytes, dtype=out_buf.dtype)
+    except ValueError:
+        print(f'length or value error: {response_bytes}')
+        raise
+
+    sem.release()
+
+
+def _handle_response_recv_buf_cb(response, out_buf, sem):
+    """Read the POST response."""
+    deferred = twisted.web.client.readBody(response)
+
+    return add_callback(deferred, _set_buffer, out_buf, sem)
+
+
+def receive_buffer(out_buf, agent, request_content, uri, sem):
+    """POSTS to uri and receives a uint8 buffer response.
+
+    Args:
+        out_buf: Output buffer.
+        agent: Web client.
+        request_content: Numpy array containing content to POST to uri.
+        uri: uri to POST to and receive buffer from.
+        sem: Semaphore to release upon receiving buffer.
+
+    Returns: a callback that fills out_buf with the POST response body.
+
+    IMPORTANT(brendan): sem will be incremented upon completion, and should be
+    acquired _before_ calling receive_buffer.
+    """
+    deferred = post_data_bytes(agent, request_content.tobytes(), uri)
+
+    return add_callback(deferred, _handle_response_recv_buf_cb, out_buf, sem)
+
+
+def start_reactor():
+    """Starts a daemon running twisted.internet.reactor.
+
+    Returns: (agent, semaphore) tuple, where agent is a web client for the
+        reactor, and semaphore is a one-valued semaphore.
+    """
+    t = threading.Thread(target=twisted.internet.reactor.run, args=(False,))
+    t.daemon = True
+    t.start()
+
+    pool = twisted.web.client.HTTPConnectionPool(
+        reactor=twisted.internet.reactor, persistent=True)
+    agent = twisted.web.client.Agent(reactor=twisted.internet.reactor,
+                                     pool=pool)
+
+    return agent, threading.Semaphore(1)
