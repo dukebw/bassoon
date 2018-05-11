@@ -30,6 +30,9 @@ import bassoon.client
 import bassoon.parameter_server
 
 
+PORT = 8880
+
+
 # NOTE(brendan): Params contains a value, and a semaphore to enforce sequential
 # sending of parameter updates (in order to simulate the normal use case).
 Params = collections.namedtuple(typename='Params', field_names='val, sem')
@@ -46,7 +49,10 @@ def _post_params(agent, params_val, page):
 
     Returns the deferred corresponding to completion of the POST request.
     """
-    return bassoon.client.post_data_bytes(agent, params_val.tobytes(), page)
+    return bassoon.client.post_data_bytes(agent,
+                                          params_val.tobytes(),
+                                          PORT,
+                                          page)
 
 
 def _reset_params(response_param_bytes, params):
@@ -244,7 +250,7 @@ def _reset_param_server_cb(agent):
     """Callback function to POST a to /reset, and stop the reactor
     afterwards.
     """
-    deferred = bassoon.client.post_body(agent, 'reset/test', None)
+    deferred = bassoon.client.post_body(agent, PORT, 'reset/test', None)
 
     return bassoon.client.add_callback(
         deferred, lambda x: twisted.internet.reactor.stop())

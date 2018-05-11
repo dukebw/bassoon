@@ -68,9 +68,9 @@ def add_callback(deferred, callback, *args):
     return deferred
 
 
-def post_body(agent, page, body):
+def post_body(agent, port, page, body):
     """Posts `body` to /`page` on localhost port 8880."""
-    uri = 'http://localhost:8880/{}'.format(page)
+    uri = f'http://localhost:{port}/{page}'
     return agent.request(method=b'POST',
                          uri=uri.encode('utf-8'),
                          headers=twisted.web.http_headers.Headers(
@@ -78,14 +78,14 @@ def post_body(agent, page, body):
                          bodyProducer=body)
 
 
-def post_data_bytes(agent, data_bytes, page):
-    """Make a POST request to localhost port 8880 with `data_bytes` as the
-    request body.
+def post_data_bytes(agent, data_bytes, port, page):
+    """Make a POST request to localhost port with `data_bytes` as the request
+    body.
     """
     body = twisted.web.client.FileBodyProducer(
         inputFile=io.BytesIO(data_bytes))
 
-    return post_body(agent, page, body)
+    return post_body(agent, port, page, body)
 
 
 def _set_buffer(response_bytes, out_buf, sem):
@@ -113,7 +113,7 @@ def receive_buffer(out_buf, agent, request_content, uri, sem):
         out_buf: Output buffer.
         agent: Web client.
         request_content: Numpy array containing content to POST to uri.
-        uri: uri to POST to and receive buffer from.
+        uri: uri (port:page) to POST to and receive buffer from.
         sem: Semaphore to release upon receiving buffer.
 
     Returns: a callback that fills out_buf with the POST response body.
@@ -121,7 +121,8 @@ def receive_buffer(out_buf, agent, request_content, uri, sem):
     IMPORTANT(brendan): sem will be incremented upon completion, and should be
     acquired _before_ calling receive_buffer.
     """
-    deferred = post_data_bytes(agent, request_content.tobytes(), uri)
+    port, page = uri.split(':')
+    deferred = post_data_bytes(agent, request_content.tobytes(), port, page)
 
     return add_callback(deferred, _handle_response_recv_buf_cb, out_buf, sem)
 
