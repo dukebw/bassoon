@@ -32,6 +32,7 @@ subclasses in this module for detailed descriptions.
 """
 import pickle
 
+import click
 import numpy as np
 import twisted.web.resource
 import twisted.web.server
@@ -523,7 +524,9 @@ def _get_semaphore_injection():
     return semaphore_injection
 
 
-def parameter_server():
+@click.command()
+@click.option('--port', default=8880, help='Port to listen on.')
+def parameter_server(port):
     """Runs a parameter server that stores and updates a set of parameters."""
     params = Injection(val=None)
     optim = Injection(val=None)
@@ -610,7 +613,7 @@ def parameter_server():
     site = twisted.web.server.Site(resource=root)
 
     endpoint = twisted.internet.endpoints.TCP4ServerEndpoint(
-        reactor=twisted.internet.reactor, port=8880)
+        reactor=twisted.internet.reactor, port=port)
     endpoint.listen(site)
 
     twisted.internet.reactor.run()
