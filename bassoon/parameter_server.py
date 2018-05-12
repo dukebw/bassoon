@@ -525,7 +525,7 @@ def _get_semaphore_injection():
 
 
 @click.command()
-@click.option('--port', default=8880, help='Port to listen on.')
+@click.option('--port', default=None, help='Port to listen on.')
 def parameter_server(port):
     """Runs a parameter server that stores and updates a set of parameters."""
     params = Injection(val=None)

@@ -69,7 +69,7 @@ def add_callback(deferred, callback, *args):
 
 
 def post_body(agent, port, page, body):
-    """Posts `body` to /`page` on localhost port 8880."""
+    """Posts `body` to /`page` on localhost `port`."""
     uri = f'http://localhost:{port}/{page}'
     return agent.request(method=b'POST',
                          uri=uri.encode('utf-8'),
