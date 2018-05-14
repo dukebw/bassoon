@@ -196,7 +196,7 @@ def _epoch_archs_response_cb(deferred, request, epoch_archs, requested_bytes):
     request.finish()
 
 
-class FusionSharedTrain(twisted.web.resource.Resource):
+class FusionSharedEpochArchs(twisted.web.resource.Resource):
     """Respond to request for an epoch of architectures."""
 
     isLeaf = True
@@ -272,6 +272,16 @@ class FusionSharedValArch(twisted.web.resource.Resource):
         return twisted.web.server.NOT_DONE_YET
 
 
+def _receive_resource(resource, request, dtype):
+    """Read from request into resource, and signal."""
+    request_content = request.content.read()
+
+    resource.val = np.frombuffer(request_content, dtype=dtype)
+    resource.sem.release()
+
+    return bytes()
+
+
 class FusionSharedValReward(twisted.web.resource.Resource):
     """Receive a reward."""
 
@@ -283,19 +293,24 @@ class FusionSharedValReward(twisted.web.resource.Resource):
 
     def render_POST(self, request):
         """Receive a validation minibatch's reward and increment semaphore."""
-        request_content = request.content.read()
-        reward = np.frombuffer(request_content, dtype=np.float32)
-
-        self.val_reward.val = np.frombuffer(reward, dtype=np.float32)
-        self.val_reward.sem.release()
-
-        return bytes()
+        return _receive_resource(self.val_reward, request, dtype=np.float32)
 
 
-def _controller_step_response_cb(deferred, request, val_reward):
-    """Respond with validation reward."""
-    request.write(val_reward.val.tobytes())
+def _resource_response_cb(deferred, request, resource):
+    """Respond with resource value once deferred is signaled."""
+    request.write(resource.val.tobytes())
     request.finish()
+
+
+def _defer_resource_response(resource, request):
+    """Defer response until resource is signaled."""
+    deferred = resource.sem.acquire()
+    client.add_callback(deferred,
+                        _resource_response_cb,
+                        request,
+                        resource)
+
+    return twisted.web.server.NOT_DONE_YET
 
 
 class FusionControllerStep(twisted.web.resource.Resource):
@@ -318,16 +333,10 @@ class FusionControllerStep(twisted.web.resource.Resource):
         self.val_arch.val = arch
         self.val_arch.sem.release()
 
-        deferred = self.val_reward.sem.acquire()
-        client.add_callback(deferred,
-                            _controller_step_response_cb,
-                            request,
-                            self.val_reward)
-
-        return twisted.web.server.NOT_DONE_YET
+        return _defer_resource_response(self.val_reward, request)
 
 
-class FusionControllerEpochArch(twisted.web.resource.Resource):
+class FusionControllerEpochArchs(twisted.web.resource.Resource):
     """Epoch architecture receiver."""
 
     isLeaf = True
@@ -338,13 +347,7 @@ class FusionControllerEpochArch(twisted.web.resource.Resource):
 
     def render_POST(self, request):
         """Receive an epoch of architectures and signal."""
-        request_content = request.content.read()
-        epoch_archs = np.frombuffer(request_content, dtype=np.uint8)
-
-        self.epoch_archs.val = epoch_archs
-        self.epoch_archs.sem.release()
-
-        return bytes()
+        return _receive_resource(self.epoch_archs, request, dtype=np.uint8)
 
 
 def _minibatches_response_cb(deferred, request, minibatches_per_epoch):
@@ -375,6 +378,34 @@ class FusionControllerMinibatches(twisted.web.resource.Resource):
             return twisted.web.server.NOT_DONE_YET
 
         return self.minibatches_per_epoch.val.tobytes()
+
+
+class FusionSharedSendCheckpoint(twisted.web.resource.Resource):
+    """Send checkpoint from train.py."""
+
+    isLeaf = True
+
+    def __init__(self, checkpoint):
+        twisted.web.resource.Resource.__init__(self)
+        self.checkpoint = checkpoint
+
+    def render_POST(self, request):  # pylint:disable=unused-argument
+        """Set and signal checkpoint."""
+        return _receive_resource(self.checkpoint, request, dtype=np.uint8)
+
+
+class FusionSharedValCheckpoint(twisted.web.resource.Resource):
+    """Receive checkpoint from shared train."""
+
+    isLeaf = True
+
+    def __init__(self, checkpoint):
+        twisted.web.resource.Resource.__init__(self)
+        self.checkpoint = checkpoint
+
+    def render_POST(self, request):  # pylint:disable=unused-argument
+        """Wait and receive checkpoint."""
+        return _defer_resource_response(self.checkpoint, request)
 
 
 class FusionSharedTrainDriver(twisted.web.resource.Resource):
@@ -549,10 +580,18 @@ def parameter_server(port):
     fusion = twisted.web.resource.Resource()
     root.putChild(path=b'fusion', child=fusion)
 
+    shared_train = twisted.web.resource.Resource()
+    fusion.putChild(path=b'shared-train', child=shared_train)
+
     epoch_archs = _get_semaphore_injection()
     minibatches_per_epoch = _get_semaphore_injection()
-    fusion_shared_train = FusionSharedTrain(epoch_archs, minibatches_per_epoch)
-    fusion.putChild(path=b'shared-train', child=fusion_shared_train)
+    shared_epoch_archs = FusionSharedEpochArchs(epoch_archs,
+                                                minibatches_per_epoch)
+    shared_train.putChild(path=b'epoch-archs', child=shared_epoch_archs)
+
+    checkpoint = _get_semaphore_injection()
+    shared_send_checkpoint = FusionSharedSendCheckpoint(checkpoint)
+    shared_train.putChild(path=b'checkpoint', child=shared_send_checkpoint)
 
     fusion_shared_val = twisted.web.resource.Resource()
     fusion.putChild(path=b'shared-val', child=fusion_shared_val)
@@ -562,23 +601,25 @@ def parameter_server(port):
     fusion_shared_val.putChild(path=b'arch', child=fusion_shared_val_arch)
 
     val_reward = _get_semaphore_injection()
-    fusion_shared_val_reward = FusionSharedValReward(val_reward)
-    fusion_shared_val.putChild(path=b'reward', child=fusion_shared_val_reward)
+    shared_val_reward = FusionSharedValReward(val_reward)
+    fusion_shared_val.putChild(path=b'reward', child=shared_val_reward)
+
+    shared_val_checkpoint = FusionSharedValCheckpoint(checkpoint)
+    fusion_shared_val.putChild(path=b'checkpoint', child=shared_val_checkpoint)
 
     controller_train = twisted.web.resource.Resource()
     fusion.putChild(path=b'controller-train', child=controller_train)
 
-    fusion_controller_step = FusionControllerStep(val_arch, val_reward)
-    controller_train.putChild(path=b'step', child=fusion_controller_step)
+    controller_step = FusionControllerStep(val_arch, val_reward)
+    controller_train.putChild(path=b'step', child=controller_step)
 
-    fusion_controller_epoch_arch = FusionControllerEpochArch(epoch_archs)
-    controller_train.putChild(path=b'epoch_arch',
-                              child=fusion_controller_epoch_arch)
+    controller_epoch_archs = FusionControllerEpochArchs(epoch_archs)
+    controller_train.putChild(path=b'epoch-archs',
+                              child=controller_epoch_archs)
 
-    fusion_controller_minibatches = FusionControllerMinibatches(
-        minibatches_per_epoch)
+    controller_minibatches = FusionControllerMinibatches(minibatches_per_epoch)
     controller_train.putChild(path=b'minibatches_per_epoch',
-                              child=fusion_controller_minibatches)
+                              child=controller_minibatches)
 
     # NOTE(brendan): Drivers and stubs for development
     fusion_shared_train_driver = FusionSharedTrainDriver()
@@ -589,29 +630,27 @@ def parameter_server(port):
     fusion.putChild(path=b'shared-val-driver',
                     child=fusion_shared_val_driver)
 
-    fusion_shared_val_driver_arch = FusionSharedValDriverArch()
+    shared_val_driver_arch = FusionSharedValDriverArch()
     fusion_shared_val_driver.putChild(path=b'arch',
-                                      child=fusion_shared_val_driver_arch)
+                                      child=shared_val_driver_arch)
 
-    fusion_shared_val_driver_reward = AckStub()
+    shared_val_driver_reward = AckStub()
     fusion_shared_val_driver.putChild(path=b'reward',
-                                      child=fusion_shared_val_driver_reward)
+                                      child=shared_val_driver_reward)
 
-    fusion_controller_train_stub = twisted.web.resource.Resource()
-    fusion.putChild(path=b'controller-train-stub',
-                    child=fusion_controller_train_stub)
+    controller_train_stub = twisted.web.resource.Resource()
+    fusion.putChild(path=b'controller-train-stub', child=controller_train_stub)
 
-    fusion_controller_step_stub = FusionControllerStepStub()
-    fusion_controller_train_stub.putChild(path=b'step',
-                                          child=fusion_controller_step_stub)
+    controller_step_stub = FusionControllerStepStub()
+    controller_train_stub.putChild(path=b'step', child=controller_step_stub)
 
-    fusion_controller_minibatches = FusionControllerMinibatchesStub()
-    fusion_controller_train_stub.putChild(path=b'minibatches_per_epoch',
-                                          child=fusion_controller_minibatches)
+    controller_minibatches_stub = FusionControllerMinibatchesStub()
+    controller_train_stub.putChild(path=b'minibatches_per_epoch',
+                                   child=controller_minibatches_stub)
 
-    fusion_controller_epoch_arch = AckStub()
-    fusion_controller_train_stub.putChild(path=b'epoch_arch',
-                                          child=fusion_controller_epoch_arch)
+    controller_epoch_archs_stub = AckStub()
+    controller_train_stub.putChild(path=b'epoch-archs',
+                                   child=controller_epoch_archs_stub)
 
     site = twisted.web.server.Site(resource=root)
 
