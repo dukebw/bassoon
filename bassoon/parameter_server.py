@@ -31,6 +31,7 @@ See the `render_POST` method docstrings for the `twisted.web.resource.Resource`
 subclasses in this module for detailed descriptions.
 """
 import pickle
+import sys
 
 import click
 import numpy as np
@@ -525,9 +526,11 @@ def _get_semaphore_injection():
 
 
 @click.command()
-@click.option('--port', default=None, help='Port to listen on.')
+@click.option('--port', type=int, default=None, help='Port to listen on.')
 def parameter_server(port):
     """Runs a parameter server that stores and updates a set of parameters."""
+    twisted.python.log.startLogging(sys.stdout)
+
     params = Injection(val=None)
     optim = Injection(val=None)
 
