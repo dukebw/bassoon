@@ -556,6 +556,99 @@ def _get_semaphore_injection():
     return semaphore_injection
 
 
+def _setup_shared_val(fusion, checkpoint):
+    """Setup pages for shared model validation, and return arch/reward
+    resources.
+    """
+    fusion_shared_val = twisted.web.resource.Resource()
+    fusion.putChild(path=b'shared-val', child=fusion_shared_val)
+
+    val_arch = _get_semaphore_injection()
+    fusion_shared_val_arch = FusionSharedValArch(val_arch)
+    fusion_shared_val.putChild(path=b'arch', child=fusion_shared_val_arch)
+
+    val_reward = _get_semaphore_injection()
+    shared_val_reward = FusionSharedValReward(val_reward)
+    fusion_shared_val.putChild(path=b'reward', child=shared_val_reward)
+
+    shared_val_checkpoint = FusionSharedValCheckpoint(checkpoint)
+    fusion_shared_val.putChild(path=b'checkpoint', child=shared_val_checkpoint)
+
+    return val_arch, val_reward
+
+
+def _setup_shared_train(fusion):
+    """Setup shared train pages, and return checkpoint, epoch architectures,
+    and minibatches per epoch resources.
+    """
+    shared_train = twisted.web.resource.Resource()
+    fusion.putChild(path=b'shared-train', child=shared_train)
+
+    epoch_archs = _get_semaphore_injection()
+    minibatches_per_epoch = _get_semaphore_injection()
+    shared_epoch_archs = FusionSharedEpochArchs(epoch_archs,
+                                                minibatches_per_epoch)
+    shared_train.putChild(path=b'epoch-archs', child=shared_epoch_archs)
+
+    checkpoint = _get_semaphore_injection()
+    shared_send_checkpoint = FusionSharedSendCheckpoint(checkpoint)
+    shared_train.putChild(path=b'checkpoint', child=shared_send_checkpoint)
+
+    return checkpoint, epoch_archs, minibatches_per_epoch
+
+
+def _setup_controller_train(fusion,
+                            val_arch,
+                            val_reward,
+                            epoch_archs,
+                            minibatches_per_epoch):
+    """Setup controller training pages."""
+    controller_train = twisted.web.resource.Resource()
+    fusion.putChild(path=b'controller-train', child=controller_train)
+
+    controller_step = FusionControllerStep(val_arch, val_reward)
+    controller_train.putChild(path=b'step', child=controller_step)
+
+    controller_epoch_archs = FusionControllerEpochArchs(epoch_archs)
+    controller_train.putChild(path=b'epoch-archs',
+                              child=controller_epoch_archs)
+
+    controller_minibatches = FusionControllerMinibatches(minibatches_per_epoch)
+    controller_train.putChild(path=b'minibatches_per_epoch',
+                              child=controller_minibatches)
+
+
+def _setup_controller_train_stub(fusion):
+    """Setup stub for controller training."""
+    controller_train_stub = twisted.web.resource.Resource()
+    fusion.putChild(path=b'controller-train-stub', child=controller_train_stub)
+
+    controller_step_stub = FusionControllerStepStub()
+    controller_train_stub.putChild(path=b'step', child=controller_step_stub)
+
+    controller_minibatches_stub = FusionControllerMinibatchesStub()
+    controller_train_stub.putChild(path=b'minibatches_per_epoch',
+                                   child=controller_minibatches_stub)
+
+    controller_epoch_archs_stub = AckStub()
+    controller_train_stub.putChild(path=b'epoch-archs',
+                                   child=controller_epoch_archs_stub)
+
+
+def _setup_shared_val_driver(fusion):
+    """Setup driver for shared model validation."""
+    fusion_shared_val_driver = twisted.web.resource.Resource()
+    fusion.putChild(path=b'shared-val-driver', child=fusion_shared_val_driver)
+
+    shared_val_driver_arch = FusionSharedValDriverArch()
+    fusion_shared_val_driver.putChild(path=b'arch',
+                                      child=shared_val_driver_arch)
+
+    shared_val_driver_reward = AckStub()
+    fusion_shared_val_driver.putChild(path=b'reward',
+                                      child=shared_val_driver_reward)
+
+
 @click.command()
 @click.option('--port', type=int, default=None, help='Port to listen on.')
 def parameter_server(port):
@@ -580,77 +673,25 @@ def parameter_server(port):
     fusion = twisted.web.resource.Resource()
     root.putChild(path=b'fusion', child=fusion)
 
-    shared_train = twisted.web.resource.Resource()
-    fusion.putChild(path=b'shared-train', child=shared_train)
+    checkpoint, epoch_archs, minibatches_per_epoch = _setup_shared_train(
+        fusion)
 
-    epoch_archs = _get_semaphore_injection()
-    minibatches_per_epoch = _get_semaphore_injection()
-    shared_epoch_archs = FusionSharedEpochArchs(epoch_archs,
-                                                minibatches_per_epoch)
-    shared_train.putChild(path=b'epoch-archs', child=shared_epoch_archs)
+    val_arch, val_reward = _setup_shared_val(fusion, checkpoint)
 
-    checkpoint = _get_semaphore_injection()
-    shared_send_checkpoint = FusionSharedSendCheckpoint(checkpoint)
-    shared_train.putChild(path=b'checkpoint', child=shared_send_checkpoint)
-
-    fusion_shared_val = twisted.web.resource.Resource()
-    fusion.putChild(path=b'shared-val', child=fusion_shared_val)
-
-    val_arch = _get_semaphore_injection()
-    fusion_shared_val_arch = FusionSharedValArch(val_arch)
-    fusion_shared_val.putChild(path=b'arch', child=fusion_shared_val_arch)
-
-    val_reward = _get_semaphore_injection()
-    shared_val_reward = FusionSharedValReward(val_reward)
-    fusion_shared_val.putChild(path=b'reward', child=shared_val_reward)
-
-    shared_val_checkpoint = FusionSharedValCheckpoint(checkpoint)
-    fusion_shared_val.putChild(path=b'checkpoint', child=shared_val_checkpoint)
-
-    controller_train = twisted.web.resource.Resource()
-    fusion.putChild(path=b'controller-train', child=controller_train)
-
-    controller_step = FusionControllerStep(val_arch, val_reward)
-    controller_train.putChild(path=b'step', child=controller_step)
-
-    controller_epoch_archs = FusionControllerEpochArchs(epoch_archs)
-    controller_train.putChild(path=b'epoch-archs',
-                              child=controller_epoch_archs)
-
-    controller_minibatches = FusionControllerMinibatches(minibatches_per_epoch)
-    controller_train.putChild(path=b'minibatches_per_epoch',
-                              child=controller_minibatches)
+    _setup_controller_train(fusion,
+                            val_arch,
+                            val_reward,
+                            epoch_archs,
+                            minibatches_per_epoch)
 
     # NOTE(brendan): Drivers and stubs for development
     fusion_shared_train_driver = FusionSharedTrainDriver()
     fusion.putChild(path=b'shared-train-driver',
                     child=fusion_shared_train_driver)
 
-    fusion_shared_val_driver = twisted.web.resource.Resource()
-    fusion.putChild(path=b'shared-val-driver',
-                    child=fusion_shared_val_driver)
+    _setup_shared_val_driver(fusion)
 
-    shared_val_driver_arch = FusionSharedValDriverArch()
-    fusion_shared_val_driver.putChild(path=b'arch',
-                                      child=shared_val_driver_arch)
-
-    shared_val_driver_reward = AckStub()
-    fusion_shared_val_driver.putChild(path=b'reward',
-                                      child=shared_val_driver_reward)
-
-    controller_train_stub = twisted.web.resource.Resource()
-    fusion.putChild(path=b'controller-train-stub', child=controller_train_stub)
-
-    controller_step_stub = FusionControllerStepStub()
-    controller_train_stub.putChild(path=b'step', child=controller_step_stub)
-
-    controller_minibatches_stub = FusionControllerMinibatchesStub()
-    controller_train_stub.putChild(path=b'minibatches_per_epoch',
-                                   child=controller_minibatches_stub)
-
-    controller_epoch_archs_stub = AckStub()
-    controller_train_stub.putChild(path=b'epoch-archs',
-                                   child=controller_epoch_archs_stub)
+    _setup_controller_train_stub(fusion)
 
     site = twisted.web.server.Site(resource=root)
 
