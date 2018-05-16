@@ -464,7 +464,7 @@ class AckStub(twisted.web.resource.Resource):
         return bytes()
 
 
-class FusionControllerStepObsStub(twisted.web.resource.Resource):
+class FusionControllerObsStub(twisted.web.resource.Resource):
     """Stub that returns a batch of random observations (fused feature
     vectors).
     """
@@ -476,8 +476,11 @@ class FusionControllerStepObsStub(twisted.web.resource.Resource):
 
     def render_POST(self, request):  # pylint:disable=unused-argument
         """Return batch of random fused feature vectors."""
+        request_content = request.content.read()
+        batch_size = np.frombuffer(request_content, dtype=np.int32)[0]
+
         return np.random.normal(
-            size=[BATCH_SIZE, FUSED_FEATURE_SIZE]).astype(np.float32).tobytes()
+            size=[batch_size, FUSED_FEATURE_SIZE]).astype(np.float32).tobytes()
 
 
 class FusionControllerStepRewardStub(twisted.web.resource.Resource):
@@ -490,10 +493,10 @@ class FusionControllerStepRewardStub(twisted.web.resource.Resource):
 
     def render_POST(self, request):  # pylint:disable=unused-argument
         """Return random reward."""
-        reward = np.clip(
-            np.random.binomial(n=1, p=0.8, size=BATCH_SIZE*MODELS_PER_EXAMPLE),
-            a_min=0.0,
-            a_max=1.0)
+        reward = np.random.binomial(n=1,
+                                    p=0.8,
+                                    size=BATCH_SIZE*MODELS_PER_EXAMPLE)
+
         return np.float32(reward).tobytes()
 
 
@@ -612,7 +615,7 @@ def _setup_shared_train(fusion):
     minibatches_per_epoch = _get_semaphore_injection()
     shared_epoch_archs = FusionSharedEpochArchs(epoch_archs,
                                                 minibatches_per_epoch)
-    shared_train.putChild(path=b'epoch-archs', child=shared_epoch_archs)
+    shared_train.putChild(path=b'iter-arch', child=shared_epoch_archs)
 
     checkpoint = _get_semaphore_injection()
     shared_send_checkpoint = FusionSharedSendCheckpoint(checkpoint)
@@ -634,7 +637,7 @@ def _setup_controller_train(fusion,
     controller_train.putChild(path=b'step', child=controller_step)
 
     controller_epoch_archs = FusionControllerEpochArchs(epoch_archs)
-    controller_train.putChild(path=b'epoch-archs',
+    controller_train.putChild(path=b'iter-arch',
                               child=controller_epoch_archs)
 
     controller_minibatches = FusionControllerMinibatches(minibatches_per_epoch)
@@ -647,9 +650,8 @@ def _setup_controller_train_stub(fusion):
     controller_train_stub = twisted.web.resource.Resource()
     fusion.putChild(path=b'controller-train-stub', child=controller_train_stub)
 
-    controller_step_obs_stub = FusionControllerStepObsStub()
-    controller_train_stub.putChild(path=b'step-obs',
-                                   child=controller_step_obs_stub)
+    controller_obs_stub = FusionControllerObsStub()
+    controller_train_stub.putChild(path=b'get-obs', child=controller_obs_stub)
 
     controller_step_reward_stub = FusionControllerStepRewardStub()
     controller_train_stub.putChild(path=b'step-reward',
@@ -659,9 +661,9 @@ def _setup_controller_train_stub(fusion):
     controller_train_stub.putChild(path=b'minibatches_per_epoch',
                                    child=controller_minibatches_stub)
 
-    controller_epoch_archs_stub = AckStub()
-    controller_train_stub.putChild(path=b'epoch-archs',
-                                   child=controller_epoch_archs_stub)
+    controller_iter_arch_stub = AckStub()
+    controller_train_stub.putChild(path=b'iter-arch',
+                                   child=controller_iter_arch_stub)
 
 
 def _setup_shared_val_driver(fusion):
