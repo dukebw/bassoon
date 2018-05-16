@@ -49,6 +49,10 @@ HTTP_SUCCESS_ALREADY_INIT = 299
 HTTP_CLIENT_ERR_NOT_INIT = 499
 HTTP_CLIENT_ERR_INVALID_PARAMS = 498
 
+BATCH_SIZE = 20
+FUSED_FEATURE_SIZE = 310
+MINIBATCHES_PER_EPOCH = 10
+MODELS_PER_EXAMPLE = 5
 NODE_SIZE = 5
 
 
@@ -460,7 +464,25 @@ class AckStub(twisted.web.resource.Resource):
         return bytes()
 
 
-class FusionControllerStepStub(twisted.web.resource.Resource):
+class FusionControllerStepObsStub(twisted.web.resource.Resource):
+    """Stub that returns a batch of random observations (fused feature
+    vectors).
+    """
+
+    isLeaf = True
+
+    def __init__(self):
+        twisted.web.resource.Resource.__init__(self)
+
+    def render_POST(self, request):  # pylint:disable=unused-argument
+        """Return batch of random fused feature vectors."""
+        return np.random.normal(
+            size=[BATCH_SIZE, FUSED_FEATURE_SIZE]).astype(np.float32).tobytes()
+
+
+class FusionControllerStepRewardStub(twisted.web.resource.Resource):
+    """Stub that returns a batch of random rewards."""
+
     isLeaf = True
 
     def __init__(self):
@@ -469,7 +491,9 @@ class FusionControllerStepStub(twisted.web.resource.Resource):
     def render_POST(self, request):  # pylint:disable=unused-argument
         """Return random reward."""
         reward = np.clip(
-            np.random.normal(loc=0.5, scale=0.1), a_min=0.0, a_max=1.0)
+            np.random.binomial(n=1, p=0.8, size=BATCH_SIZE*MODELS_PER_EXAMPLE),
+            a_min=0.0,
+            a_max=1.0)
         return np.float32(reward).tobytes()
 
 
@@ -483,7 +507,7 @@ class FusionControllerMinibatchesStub(twisted.web.resource.Resource):
 
     def render_POST(self, request):  # pylint:disable=unused-argument
         """Return number of minibatches per epoch."""
-        return np.int32(1500).tobytes()
+        return np.int32(MINIBATCHES_PER_EPOCH).tobytes()
 
 
 def _decode_params(request):
@@ -623,8 +647,13 @@ def _setup_controller_train_stub(fusion):
     controller_train_stub = twisted.web.resource.Resource()
     fusion.putChild(path=b'controller-train-stub', child=controller_train_stub)
 
-    controller_step_stub = FusionControllerStepStub()
-    controller_train_stub.putChild(path=b'step', child=controller_step_stub)
+    controller_step_obs_stub = FusionControllerStepObsStub()
+    controller_train_stub.putChild(path=b'step-obs',
+                                   child=controller_step_obs_stub)
+
+    controller_step_reward_stub = FusionControllerStepRewardStub()
+    controller_train_stub.putChild(path=b'step-reward',
+                                   child=controller_step_reward_stub)
 
     controller_minibatches_stub = FusionControllerMinibatchesStub()
     controller_train_stub.putChild(path=b'minibatches_per_epoch',
