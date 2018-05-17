@@ -153,9 +153,6 @@ class Update(twisted.web.resource.Resource):
 
 def _gen_random_arch(num_nodes, rank):
     """Generates one uniformly random architecture with num_nodes nodes."""
-    # TODO(brendan): This is no longer correct: New format is
-    # [binary_op, act_fn1, act_fn2, node1, node2] since this is output from the
-    # controller.
     binary_ops = np.random.binomial(n=1, p=0.5, size=num_nodes)
 
     act_fns = np.random.multinomial(n=1,
@@ -169,23 +166,32 @@ def _gen_random_arch(num_nodes, rank):
     in_nodes = [np.argmax(n, axis=1) for n in in_nodes]
     in_nodes = np.concatenate(in_nodes)
 
-    # NOTE(brendan): wire_arch is of length
-    # num_nodes + 2*num_nodes + 2*num_nodes
-    wire_arch = np.concatenate([binary_ops, act_fns, in_nodes])
+    # NOTE(brendan): architecture format:
+    # num_nodes*(bin_op, 2*act_fn, 2*skip_index)
+    wire_arch = []
+    for i in range(num_nodes):
+        wire_arch.append(binary_ops[i])
 
-    return wire_arch.astype(np.uint8)
+        wire_arch.append(act_fns[2*i + 0])
+        wire_arch.append(act_fns[2*i + 1])
+
+        wire_arch.append(in_nodes[2*i + 0])
+        wire_arch.append(in_nodes[2*i + 1])
+
+    return np.array(wire_arch, dtype=np.uint8)
 
 
 def _read_shared_train(request):
     """Read and return request content from shared model trainer."""
     request_content = request.content.read()
-    request_content = np.frombuffer(request_content, dtype=np.int32)
 
-    minibatches_per_epoch = request_content[0]
-    num_nodes = request_content[1]
-    rank = request_content[2]
+    metadata = np.frombuffer(request_content[:2*4], dtype=np.int32)
+    num_nodes = metadata[0]
+    rank = metadata[1]
 
-    return minibatches_per_epoch, num_nodes, rank
+    fused_features = np.frombuffer(request_content[2*4:], dtype=np.float32)
+
+    return num_nodes, rank, fused_features
 
 
 def _epoch_archs_response_cb(deferred, request, epoch_archs, requested_bytes):
@@ -232,17 +238,20 @@ class FusionSharedEpochArchs(twisted.web.resource.Resource):
 def _read_shared_val_arch(request):
     """Read arch request content from validate_rl script."""
     request_content = request.content.read()
-    request_content = np.frombuffer(request_content, dtype=np.int32)
+    metadata = np.frombuffer(request_content[:2*4], dtype=np.int32)
 
-    num_nodes = request_content[0]
-    rank = request_content[1]
+    num_nodes = metadata[0]
+    rank = metadata[1]
 
-    return num_nodes, rank
+    fused_features = np.frombuffer(request_content[2*4:], dtype=np.float32)
+
+    return num_nodes, rank, fused_features
 
 
 def _val_arch_response_cb(deferred, request, val_arch):
     """Respond with a single architecture for validation."""
-    num_nodes, _ = _read_shared_val_arch(request)
+    # TODO(brendan): Read this before the callback, signal iter-arch
+    num_nodes, _, fused_features = _read_shared_val_arch(request)
 
     val_arch = val_arch.val
     if NODE_SIZE*num_nodes != len(val_arch):
@@ -424,20 +433,14 @@ class FusionSharedTrainDriver(twisted.web.resource.Resource):
         """Generates a uniformly random epoch of architectures with num_nodes
         nodes.
         """
-        minibatches_per_epoch, num_nodes, rank = _read_shared_train(request)
+        num_nodes, rank, _ = _read_shared_train(request)
 
-        epoch_archs = []
-        for _ in range(minibatches_per_epoch):
-            wire_arch = _gen_random_arch(num_nodes, rank)
+        wire_arch = _gen_random_arch(num_nodes, rank)
 
-            epoch_archs.append(wire_arch)
-
-        epoch_archs = np.concatenate(epoch_archs).tobytes()
-
-        return epoch_archs
+        return wire_arch.tobytes()
 
 
-class FusionSharedValDriverArch(twisted.web.resource.Resource):
+class FusionSharedValArchDriver(twisted.web.resource.Resource):
     isLeaf = True
 
     def __init__(self):
@@ -445,8 +448,13 @@ class FusionSharedValDriverArch(twisted.web.resource.Resource):
 
     def render_POST(self, request):
         """Returns one uniformly random architecture."""
-        num_nodes, rank = _read_shared_val_arch(request)
-        arch = _gen_random_arch(num_nodes, rank)
+        num_nodes, rank, _ = _read_shared_val_arch(request)
+
+        arch = []
+        for _ in range(BATCH_SIZE):
+            arch.append(_gen_random_arch(num_nodes, rank))
+
+        arch = np.concatenate(arch)
 
         return arch.tobytes()
 
@@ -671,9 +679,9 @@ def _setup_shared_val_driver(fusion):
     fusion_shared_val_driver = twisted.web.resource.Resource()
     fusion.putChild(path=b'shared-val-driver', child=fusion_shared_val_driver)
 
-    shared_val_driver_arch = FusionSharedValDriverArch()
+    shared_val_arch_driver = FusionSharedValArchDriver()
     fusion_shared_val_driver.putChild(path=b'arch',
-                                      child=shared_val_driver_arch)
+                                      child=shared_val_arch_driver)
 
     shared_val_driver_reward = AckStub()
     fusion_shared_val_driver.putChild(path=b'reward',
