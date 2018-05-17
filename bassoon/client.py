@@ -112,17 +112,22 @@ def receive_buffer(out_buf, agent, request_content, uri, sem):
     Args:
         out_buf: Output buffer.
         agent: Web client.
-        request_content: Numpy array containing content to POST to uri.
+        request_content: Bytes or numpy array containing content to POST to
+            uri.
         uri: uri (port:page) to POST to and receive buffer from.
         sem: Semaphore to release upon receiving buffer.
 
     Returns: a callback that fills out_buf with the POST response body.
 
-    IMPORTANT(brendan): sem will be incremented upon completion, and should be
+    IMPORTANT(brendan): sem increments upon completion, and should be
     acquired _before_ calling receive_buffer.
     """
     port, page = uri.split(':')
-    deferred = post_data_bytes(agent, request_content.tobytes(), port, page)
+
+    if not isinstance(request_content, bytes):
+        request_content = request_content.tobytes()
+
+    deferred = post_data_bytes(agent, request_content, port, page)
 
     return add_callback(deferred, _handle_response_recv_buf_cb, out_buf, sem)
 
