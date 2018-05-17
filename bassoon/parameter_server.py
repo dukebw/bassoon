@@ -259,7 +259,7 @@ def _read_shared_val_arch(request):
 def _val_arch_response_cb(deferred, request, val_arch, num_nodes):
     """Respond with a single architecture for validation."""
     val_arch = val_arch.val
-    if NODE_SIZE*num_nodes != len(val_arch):
+    if MODELS_PER_EXAMPLE*BATCH_SIZE*NODE_SIZE*num_nodes != len(val_arch):
         request.setResponseCode(HTTP_CLIENT_ERR_INVALID_PARAMS)
 
         request.write(bytes())
