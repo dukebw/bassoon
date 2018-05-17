@@ -135,6 +135,10 @@ def receive_buffer(out_buf, agent, request_content, uri, sem):
 def start_reactor():
     """Starts a daemon running twisted.internet.reactor.
 
+    A separate thread is started running `twisted.internet.reactor`. All
+    `twisted` calls should be made to this thread using
+    `twisted.internet.reactor.callFromThread`.
+
     Returns: (agent, semaphore) tuple, where agent is a web client for the
         reactor, and semaphore is a one-valued semaphore.
     """
