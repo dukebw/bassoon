@@ -256,22 +256,21 @@ def _read_shared_val_arch(request):
     return num_nodes, node_size, features
 
 
-def _val_arch_response_cb(deferred,
-                          request,
-                          val_arch,
-                          num_nodes,
-                          controller_batch_size,
-                          node_size):
-    """Respond with a single architecture for validation."""
-    val_arch = val_arch.val
-    if controller_batch_size*node_size*num_nodes != len(val_arch):
-        request.setResponseCode(HTTP_CLIENT_ERR_INVALID_PARAMS)
-
-        request.write(bytes())
-        request.finish()
-
-    request.write(val_arch.tobytes())
+def _resource_response_cb(deferred, request, resource):
+    """Respond with resource value once deferred is signaled."""
+    request.write(resource.val.tobytes())
     request.finish()
+
+
+def _defer_resource_response(resource, request):
+    """Defer response until resource is signaled."""
+    deferred = resource.sem.acquire()
+    client.add_callback(deferred,
+                        _resource_response_cb,
+                        request,
+                        resource)
+
+    return twisted.web.server.NOT_DONE_YET
 
 
 class FusionSharedValArch(twisted.web.resource.Resource):
@@ -279,31 +278,20 @@ class FusionSharedValArch(twisted.web.resource.Resource):
 
     isLeaf = True
 
-    def __init__(self, obs, val_arch, controller_batch_size):
+    def __init__(self, obs, val_arch):
         twisted.web.resource.Resource.__init__(self)
 
-        self.controller_batch_size = controller_batch_size
         self.obs = obs
         self.val_arch = val_arch
 
     def render_POST(self, request):
         """Wait on validation architecture then send it."""
-        num_nodes, node_size, obs = _read_shared_val_arch(request)
+        _, _, obs = _read_shared_val_arch(request)
 
         self.obs.val = obs
         self.obs.sem.release()
 
-        deferred = self.val_arch.sem.acquire()
-
-        client.add_callback(deferred,
-                            _val_arch_response_cb,
-                            request,
-                            self.val_arch,
-                            num_nodes,
-                            self.controller_batch_size,
-                            node_size)
-
-        return twisted.web.server.NOT_DONE_YET
+        return _defer_resource_response(self.val_arch, request)
 
 
 def _receive_resource(resource, request, dtype):
@@ -328,23 +316,6 @@ class FusionSharedValReward(twisted.web.resource.Resource):
     def render_POST(self, request):
         """Receive a validation minibatch's reward and increment semaphore."""
         return _receive_resource(self.val_reward, request, dtype=np.float32)
-
-
-def _resource_response_cb(deferred, request, resource):
-    """Respond with resource value once deferred is signaled."""
-    request.write(resource.val.tobytes())
-    request.finish()
-
-
-def _defer_resource_response(resource, request):
-    """Defer response until resource is signaled."""
-    deferred = resource.sem.acquire()
-    client.add_callback(deferred,
-                        _resource_response_cb,
-                        request,
-                        resource)
-
-    return twisted.web.server.NOT_DONE_YET
 
 
 class FusionControllerStepReward(twisted.web.resource.Resource):
@@ -528,14 +499,12 @@ class FusionControllerObsStub(twisted.web.resource.Resource):
 
     isLeaf = True
 
-    def __init__(self, controller_batch_size):
+    def __init__(self):
         twisted.web.resource.Resource.__init__(self)
-
-        self.controller_batch_size = controller_batch_size
 
     def render_POST(self, request):  # pylint:disable=unused-argument
         """Return batch of random input feature vectors."""
-        random_features_size = [self.controller_batch_size, FEATURES_SIZE]
+        random_features_size = [BATCH_SIZE, FEATURES_SIZE]
 
         return np.random.normal(
             size=random_features_size).astype(np.float32).tobytes()
@@ -639,7 +608,7 @@ def _get_semaphore_injection():
     return semaphore_injection
 
 
-def _setup_shared_val(fusion, checkpoint, controller_batch_size):
+def _setup_shared_val(fusion, checkpoint):
     """Setup pages for shared model validation, and return arch/reward
     resources.
     """
@@ -648,9 +617,7 @@ def _setup_shared_val(fusion, checkpoint, controller_batch_size):
 
     obs = _get_semaphore_injection()
     val_arch = _get_semaphore_injection()
-    fusion_shared_val_arch = FusionSharedValArch(obs,
-                                                 val_arch,
-                                                 controller_batch_size)
+    fusion_shared_val_arch = FusionSharedValArch(obs, val_arch)
     fusion_shared_val.putChild(path=b'arch', child=fusion_shared_val_arch)
 
     val_reward = _get_semaphore_injection()
@@ -715,12 +682,12 @@ def _setup_controller_train(fusion,
                               child=controller_minibatches)
 
 
-def _setup_controller_train_stub(fusion, controller_batch_size):
+def _setup_controller_train_stub(fusion):
     """Setup stub for controller training."""
     controller_train_stub = twisted.web.resource.Resource()
     fusion.putChild(path=b'controller-train-stub', child=controller_train_stub)
 
-    controller_obs_stub = FusionControllerObsStub(controller_batch_size)
+    controller_obs_stub = FusionControllerObsStub()
     controller_train_stub.putChild(path=b'get-obs', child=controller_obs_stub)
 
     controller_step_reward_stub = FusionControllerStepRewardStub()
@@ -751,12 +718,8 @@ def _setup_shared_val_driver(fusion):
 
 
 @click.command()
-@click.option('--controller-batch-size',
-              type=int,
-              default=None,
-              help='Size of controller minibatch.')
 @click.option('--port', type=int, default=None, help='Port to listen on.')
-def parameter_server(controller_batch_size, port):
+def parameter_server(port):
     """Runs a parameter server that stores and updates a set of parameters."""
     twisted.python.log.startLogging(sys.stdout)
 
@@ -783,9 +746,7 @@ def parameter_server(controller_batch_size, port):
      minibatches_per_epoch,
      train_ex_features) = _setup_shared_train(fusion)
 
-    obs, val_arch, val_reward = _setup_shared_val(fusion,
-                                                  checkpoint,
-                                                  controller_batch_size)
+    obs, val_arch, val_reward = _setup_shared_val(fusion, checkpoint)
 
     _setup_controller_train(fusion,
                             val_arch,
@@ -802,7 +763,7 @@ def parameter_server(controller_batch_size, port):
 
     _setup_shared_val_driver(fusion)
 
-    _setup_controller_train_stub(fusion, controller_batch_size)
+    _setup_controller_train_stub(fusion)
 
     site = twisted.web.server.Site(resource=root)
 
