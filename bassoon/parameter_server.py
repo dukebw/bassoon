@@ -195,18 +195,6 @@ def _read_shared_train(request):
     return minibatches_per_epoch, num_nodes, node_size, features
 
 
-def _iter_arch_response_cb(deferred, request, iter_arch, requested_bytes):
-    """Respond with iter_arch bytes."""
-    if requested_bytes != len(iter_arch.val):
-        request.setResponseCode(HTTP_CLIENT_ERR_INVALID_PARAMS)
-
-        request.write(bytes())
-        request.finish()
-
-    request.write(iter_arch.val.tobytes())
-    request.finish()
-
-
 class FusionSharedIterArch(twisted.web.resource.Resource):
     """Respond to request for an architecture."""
 
@@ -220,10 +208,7 @@ class FusionSharedIterArch(twisted.web.resource.Resource):
 
     def render_POST(self, request):
         """Return an architecture once available."""
-        (minibatches_per_epoch,
-         num_nodes,
-         node_size,
-         features) = _read_shared_train(request)
+        minibatches_per_epoch, _, _, features = _read_shared_train(request)
 
         if self.minibatches_per_epoch.val is None:
             self.minibatches_per_epoch.val = minibatches_per_epoch
@@ -232,15 +217,7 @@ class FusionSharedIterArch(twisted.web.resource.Resource):
         self.train_ex_features.val = features
         self.train_ex_features.sem.release()
 
-        deferred = self.iter_arch.sem.acquire()
-
-        client.add_callback(deferred,
-                            _iter_arch_response_cb,
-                            request,
-                            self.iter_arch,
-                            num_nodes*node_size)
-
-        return twisted.web.server.NOT_DONE_YET
+        return _defer_resource_response(self.iter_arch, request)
 
 
 def _read_shared_val_arch(request):
