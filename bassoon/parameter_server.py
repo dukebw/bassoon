@@ -455,7 +455,7 @@ def _setup_shared_val(fusion, checkpoint):
     obs = _get_semaphore_injection()
     val_arch = _get_semaphore_injection()
     fusion_shared_val_arch = FusionSharedValArch(obs, val_arch)
-    fusion_shared_val.putChild(path=b'arch', child=fusion_shared_val_arch)
+    fusion_shared_val.putChild(path=b'iter-arch', child=fusion_shared_val_arch)
 
     val_reward = _get_semaphore_injection()
     shared_val_reward = FusionSharedValReward(val_reward)
