@@ -167,14 +167,15 @@ def _read_shared_train_iter_arch(request):
     """
     request_content = request.content.read()
 
-    num_metadata = 1
+    num_metadata = 2
     metadata = np.frombuffer(request_content[:num_metadata*4], dtype=np.int32)
-    minibatches_per_epoch = metadata[0]
+    ex_per_minibatch = metadata[0]
+    minibatches_per_epoch = metadata[1]
 
     features = np.frombuffer(request_content[num_metadata*4:],
                              dtype=np.float32)
 
-    return minibatches_per_epoch, features
+    return ex_per_minibatch, minibatches_per_epoch, features
 
 
 class FusionSharedIterArch(twisted.web.resource.Resource):
@@ -190,11 +191,13 @@ class FusionSharedIterArch(twisted.web.resource.Resource):
 
     def render_POST(self, request):
         """Return an architecture once available."""
-        minibatches_per_epoch, features = _read_shared_train_iter_arch(request)
+        (ex_per_minibatch,
+         minibatches_per_epoch,
+         features) = _read_shared_train_iter_arch(request)
 
         if self.minibatches_per_epoch.val is None:
-            self.minibatches_per_epoch.val = np.array([minibatches_per_epoch],
-                                                      dtype=np.int32)
+            self.minibatches_per_epoch.val = np.array(
+                [ex_per_minibatch, minibatches_per_epoch], dtype=np.int32)
             self.minibatches_per_epoch.sem.release()
 
         self.train_ex_features.val = features
@@ -324,7 +327,8 @@ class FusionControllerIterArch(twisted.web.resource.Resource):
 class FusionControllerMinibatches(twisted.web.resource.Resource):
     """Transfer minibatches per epoch information.
 
-    NOTE(brendan): minibatches per epoch is [minibatches_per_epoch].
+    NOTE(brendan): minibatches per epoch is
+    [ex_per_minibatch, minibatches_per_epoch].
     """
 
     isLeaf = True
