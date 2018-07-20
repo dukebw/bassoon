@@ -88,22 +88,23 @@ def post_data_bytes(agent, data_bytes, port, page):
     return post_body(agent, port, page, body)
 
 
-def _set_buffer(response_bytes, out_buf, sem):
+def _set_buffer(response_bytes, out_buf, sem, uri):
     """Copy the response into out_buf."""
     try:
         out_buf[:] = np.frombuffer(response_bytes, dtype=out_buf.dtype)
     except ValueError:
         print(f'length or value error: {response_bytes}')
+        print(f'uri: {uri}')
         raise
 
     sem.release()
 
 
-def _handle_response_recv_buf_cb(response, out_buf, sem):
+def _handle_response_recv_buf_cb(response, out_buf, sem, uri):
     """Read the POST response."""
     deferred = twisted.web.client.readBody(response)
 
-    return add_callback(deferred, _set_buffer, out_buf, sem)
+    return add_callback(deferred, _set_buffer, out_buf, sem, uri)
 
 
 def receive_buffer(out_buf, agent, request_content, uri, sem):
@@ -129,7 +130,11 @@ def receive_buffer(out_buf, agent, request_content, uri, sem):
 
     deferred = post_data_bytes(agent, request_content, port, page)
 
-    return add_callback(deferred, _handle_response_recv_buf_cb, out_buf, sem)
+    return add_callback(deferred,
+                        _handle_response_recv_buf_cb,
+                        out_buf,
+                        sem,
+                        uri)
 
 
 def start_reactor():
